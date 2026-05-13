@@ -1,0 +1,113 @@
+{
+  "project_context": {
+    "domain": "Aviation Operations Control Center (OCC) / Serious Simulation Game",
+    "theme": "Dark Theme (Mandatory for NOC/Ops environments)",
+    "archetype": "Archetype 4 (Swiss & High-Contrast) / Retro-Futurism Hybrid (Control Room Grid)",
+    "vibe": "Tense, professional, information-dense, tactical, objective. 'Bloomberg Terminal meets AIMS Airline Ops'."
+  },
+  "typography": {
+    "anti_ai_rules": "No Inter. No Space Grotesk. No default sans-serifs.",
+    "headings": {
+      "font_family": "Azeret Mono",
+      "import_url": "https://fonts.googleapis.com/css2?family=Azeret+Mono:wght@400;600;700;800&display=swap",
+      "usage": "Data points, KPI numbers, Status codes (Flight Numbers, Crew IDs), and Primary Section Headers",
+      "styling": "tracking-tight uppercase",
+      "weights": ["600", "700"]
+    },
+    "body": {
+      "font_family": "Figtree",
+      "import_url": "https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600&display=swap",
+      "usage": "Standard UI text, descriptions, rule explanations, tooltips",
+      "styling": "tracking-normal leading-snug",
+      "weights": ["400", "500"]
+    },
+    "mono_accents": {
+      "font_family": "JetBrains Mono",
+      "import_url": "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap",
+      "usage": "Timestamps, coordinates, log outputs, raw IDs",
+      "styling": "text-xs tracking-widest uppercase"
+    }
+  },
+  "colors": {
+    "background": {
+      "void": "#000000",
+      "primary": "#050505",
+      "panel": "#0A0A0C",
+      "surface": "#121214"
+    },
+    "borders": {
+      "grid": "rgba(255,255,255,0.06)",
+      "panel": "rgba(255,255,255,0.12)",
+      "focus": "rgba(0,229,255,0.5)"
+    },
+    "text": {
+      "primary": "#F4F4F5",
+      "secondary": "#A1A1AA",
+      "muted": "#52525B",
+      "inverse": "#000000"
+    },
+    "status": {
+      "nominal": "#00E676",
+      "delay_warning": "#FFC107",
+      "critical_breach": "#FF3B30",
+      "info_system": "#00E5FF",
+      "standby": "#9C27B0"
+    },
+    "duty_blocks": {
+      "flight": "rgba(0, 229, 255, 0.15)",
+      "rest": "rgba(255, 255, 255, 0.05)",
+      "standby": "rgba(255, 193, 7, 0.15)",
+      "off": "rgba(0, 230, 118, 0.1)",
+      "sick": "rgba(255, 59, 48, 0.2)"
+    },
+    "brand_accent": "#00E5FF"
+  },
+  "layout_and_spacing": {
+    "grid_system": "MODE B: THE 'CONTROL ROOM' GRID",
+    "corners": "rounded-none (Strictly 0px border-radius everywhere. No pill buttons, no rounded cards. Emulate legacy hardware).",
+    "density": "High density. Use tight padding (p-1, p-2) inside data tables and Gantt charts. Use p-4 for panel containers.",
+    "borders": "Expose the skeleton. Use border-collapse style layouts with 1px borders between all grid items.",
+    "alignment": "Left-align all data arrays. Right-align numerical KPIs and costs."
+  },
+  "components": {
+    "panels": "bg-[#0A0A0C] border border-white/10 rounded-none. No drop shadows.",
+    "buttons": "Square edges. Default: border border-white/20 text-white hover:bg-white/10. Primary action: border border-[#00E5FF] text-[#00E5FF] hover:bg-[#00E5FF] hover:text-black.",
+    "status_badges": "Border-only badges with neon text. Example: text-[#FF3B30] border border-[#FF3B30]/50 bg-[#FF3B30]/10. Never use solid fills.",
+    "tables_and_gantt": "Zebra striping with ultra-subtle greys (bg-white/[0.02]). Monospace fonts for all table data cells. Sticky headers.",
+    "modals": "Backdrop blur is permitted for depth (backdrop-blur-md bg-black/80). Modals must have a 2px top-border of the relevant status color (e.g., Red for Incident Queue).",
+    "forms": "Inputs should have bottom-border only (border-b) or strict rectangular 1px borders. bg-black/50. No focus rings, use border color change on focus."
+  },
+  "motion_and_interactions": {
+    "speed": "Instant (0ms to 100ms). The UI must feel like a zero-latency military or aviation terminal. Do not use spring animations.",
+    "hover": "Subtle background lighten (bg-white/5), instant text color brighten.",
+    "loading": "Terminal cursor blinking '_' or raw ASCII progress bars [||||....]."
+  },
+  "icons": {
+    "library": "@phosphor-icons/react",
+    "style": "Regular or Bold weight. No Duotone (to maintain starkness).",
+    "installation": "yarn add @phosphor-icons/react"
+  },
+  "media": {
+    "loading_bg_image": "https://images.unsplash.com/photo-1757031299897-8014e806a3fb?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1Nzd8MHwxfHNlYXJjaHwxfHxhaXJwb3J0JTIwdGFybWFjJTIwbmlnaHQlMjByYWlufGVufDB8fHx8MTc3ODY5MTgxNnww&ixlib=rb-4.1.0&q=85",
+    "usage": "Use this image heavily darkened (bg-black/80 overlay) for the initial simulation boot-up/loading screen."
+  },
+  "view_specific_guidelines": {
+    "ops_dashboard": "Masonry/CSS Grid. Massive typography for KPIs. Heavy use of Status Colors. Example: OTP (On-Time Performance) in 6xl Azeret Mono.",
+    "roster_board": "Assign-style grid. Rows = Crew (Rank, Qual, Name). Columns = Days. Use `duty_blocks` colors for the cell backgrounds. Sticky leftmost column.",
+    "flight_timeline": "Gantt chart view. Horizontal scroll. X-axis = Time. Y-axis = Aircraft Registrations. Blocks representing flights. Cyan = on-time, Red = delayed.",
+    "ai_advisor": "Right-side drawer or persistent side panel. Use JetBrains Mono for the AI's output to mimic a telex or ACARS message. Prefix with '>> SYS_MSG:'.",
+    "incident_queue": "A scrolling feed of alerts. Red text for critical (weather, sickness), yellow for warnings (late reports). Interactive rows to open Decision Action Modals."
+  },
+  "testing_requirements": {
+    "rule": "All interactive and key informational elements MUST include a data-testid attribute. Kebab-case, role-based. e.g., data-testid='incident-resolve-btn'."
+  },
+  "instructions_to_main_agent": [
+    "Load Azeret Mono, Figtree, and JetBrains Mono fonts in index.html or global css.",
+    "Strictly adhere to the 'Control Room' grid layout: zero rounded corners, 1px visible borders, ultra-dark backgrounds.",
+    "Do NOT use default Shadcn themes (no rounded-md, no soft shadows, no Inter font). You must customize the primitive components to be sharp and flat.",
+    "Use CSS Grid for the layout skeleton (h-screen, overflow-hidden on body) to ensure it feels like a native app/kiosk, not a scrolling web page.",
+    "For the Timeline and Roster boards, implement robust horizontal scrolling with fixed Y-axis headers (using position: sticky).",
+    "Prioritize data density. The interface should feel slightly overwhelming at first glance, just like a real OCC.",
+    "Do not use gradients for backgrounds. Keep surfaces mathematically flat."
+  ]
+}
