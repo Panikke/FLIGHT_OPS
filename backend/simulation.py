@@ -67,7 +67,7 @@ CREW_NAMES = [
 MIN_REST_HOME_HR = 12
 MIN_REST_AWAY_HR = 10
 MAX_FDP_MIN_2SECTOR = 13 * 60
-MAX_FDP_MIN_LONGHAUL = 14 * 60
+MAX_FDP_MIN_LONGHAUL = 16 * 60  # augmented crew + rest facility extends FDP
 MAX_BLOCK_28D_HR = 100
 MAX_DUTY_7D_HR = 60
 
@@ -144,72 +144,76 @@ def _add_minutes_to_clock(base_iso: str, minutes: int) -> str:
 
 
 def _generate_day_flights(day_start_iso: str) -> list[dict]:
-    """Generate ~24 flights across the operational day. Mixed short + long haul."""
+    """Generate flights for the operational day.
+    Short-haul: aircraft does multiple out-and-back rotations from LHR.
+      Each (outbound + return) pair shares a `pairing_id` — the same crew set
+      operates both sectors (realistic short-haul operation).
+    Long-haul: aircraft does ONE outbound today; the return is a next-day
+      operation (crew night-stops downroute). Pairing_id is unique to that
+      single sector for the day.
+    """
     flights = []
-    # Anchor day at provided iso (will use day-start 04:00 UTC)
     day_start = datetime.fromisoformat(day_start_iso)
     fnum = 100
-    # Schedule each aircraft a couple of rotations
     for ac in FLEET:
-        depart_min = random.randint(0, 180)  # 0-3h after day start
-        rotations = 3 if ac["type"] == "A320" else 1
-        for _ in range(rotations):
-            if ac["type"] == "A320":
+        depart_min = random.randint(0, 180)
+        if ac["type"] == "A320":
+            # 2 to 3 out-and-back rotations in the day, each = 1 pairing
+            rotations = random.choice([2, 3])
+            for _ in range(rotations):
                 origin, dest, block = random.choice(ROUTES_SHORT)
-                back_origin, back_dest, back_block = dest, origin, block
-            else:
-                origin, dest, block, type_pref = random.choice(ROUTES_LONG)
-                if type_pref != ac["type"]:
-                    continue
-                back_origin, back_dest, back_block = dest, origin, block
-
+                pairing_id = _hash_id("PAIR")
+                std = (day_start + timedelta(minutes=depart_min)).isoformat()
+                sta = _add_minutes_to_clock(std, block)
+                out = _make_flight(fnum, origin, dest, std, sta, block, ac, pairing_id)
+                flights.append(out)
+                fnum += 2
+                turn = 60
+                depart_min += block + turn
+                std2 = (day_start + timedelta(minutes=depart_min)).isoformat()
+                sta2 = _add_minutes_to_clock(std2, block)
+                back = _make_flight(fnum, dest, origin, std2, sta2, block, ac, pairing_id)
+                flights.append(back)
+                fnum += 2
+                depart_min += block + turn
+        else:
+            # Long-haul: ONE sector today (outbound), crew night-stops.
+            # No same-day return — that's tomorrow's problem.
+            choices = [r for r in ROUTES_LONG if r[3] == ac["type"]]
+            if not choices:
+                continue
+            origin, dest, block, _type_pref = random.choice(choices)
             std = (day_start + timedelta(minutes=depart_min)).isoformat()
             sta = _add_minutes_to_clock(std, block)
-            flights.append({
-                "id": _hash_id("FLT"),
-                "callsign": f"EGW{fnum}",
-                "origin": origin,
-                "destination": dest,
-                "std": std,
-                "sta": sta,
-                "block_min": block,
-                "aircraft_reg": ac["reg"],
-                "aircraft_type": ac["type"],
-                "status": "scheduled",          # scheduled | boarding | airborne | delayed | cancelled | diverted
-                "delay_min": 0,
-                "pax_count": random.randint(int(AIRCRAFT_TYPES[ac["type"]]["seats"] * 0.65), AIRCRAFT_TYPES[ac["type"]]["seats"]),
-                "assigned_crew_ids": [],
-                "required_crew": _required_crew_for(ac["type"], block),
-                "note": "",
-            })
+            pairing_id = _hash_id("PAIR")
+            flights.append(_make_flight(fnum, origin, dest, std, sta, block, ac, pairing_id))
             fnum += 2
-            # Turnaround
-            turn = 60 if ac["type"] == "A320" else 180
-            depart_min += block + turn
-            # Return leg
-            std2 = (day_start + timedelta(minutes=depart_min)).isoformat()
-            sta2 = _add_minutes_to_clock(std2, back_block)
-            flights.append({
-                "id": _hash_id("FLT"),
-                "callsign": f"EGW{fnum}",
-                "origin": back_origin,
-                "destination": back_dest,
-                "std": std2,
-                "sta": sta2,
-                "block_min": back_block,
-                "aircraft_reg": ac["reg"],
-                "aircraft_type": ac["type"],
-                "status": "scheduled",
-                "delay_min": 0,
-                "pax_count": random.randint(int(AIRCRAFT_TYPES[ac["type"]]["seats"] * 0.65), AIRCRAFT_TYPES[ac["type"]]["seats"]),
-                "assigned_crew_ids": [],
-                "required_crew": _required_crew_for(ac["type"], back_block),
-                "note": "",
-            })
-            fnum += 2
-            depart_min += back_block + turn
     flights.sort(key=lambda f: f["std"])
     return flights
+
+
+def _make_flight(fnum, origin, dest, std, sta, block, ac, pairing_id):
+    return {
+        "id": _hash_id("FLT"),
+        "callsign": f"EGW{fnum}",
+        "origin": origin,
+        "destination": dest,
+        "std": std,
+        "sta": sta,
+        "block_min": block,
+        "aircraft_reg": ac["reg"],
+        "aircraft_type": ac["type"],
+        "status": "scheduled",
+        "delay_min": 0,
+        "pax_count": random.randint(
+            int(AIRCRAFT_TYPES[ac["type"]]["seats"] * 0.65),
+            AIRCRAFT_TYPES[ac["type"]]["seats"],
+        ),
+        "assigned_crew_ids": [],
+        "required_crew": _required_crew_for(ac["type"], block),
+        "pairing_id": pairing_id,
+        "note": "",
+    }
 
 
 def _required_crew_for(ac_type: str, block_min: int) -> dict:
@@ -352,23 +356,33 @@ def check_assignment(state: dict, flight_id: str, crew_id: str) -> list[dict]:
             "rule_ref": "Industrial Agreement Art. 14",
         })
 
-    # FDP
-    block = flight["block_min"]
-    projected_fdp = crew["fdp_used_min"] + block + 90  # +90 min for report+post-flight
-    fdp_max = MAX_FDP_MIN_LONGHAUL if block > 360 else MAX_FDP_MIN_2SECTOR
+    # FDP — short-haul out-and-back pairing is ONE Flight Duty Period
+    pairing_id = flight.get("pairing_id")
+    pairing_flights = [f for f in state["flights"] if pairing_id and f.get("pairing_id") == pairing_id]
+    if not pairing_flights:
+        pairing_flights = [flight]
+    pairing_block = sum(pf["block_min"] for pf in pairing_flights)
+    # Add report (60min) + turnaround time(s) + post-flight (30min)
+    pairing_sectors = len(pairing_flights)
+    fdp_total = pairing_block + 60 + 30 + (pairing_sectors - 1) * 60  # 60-min turnaround per sector change
+    projected_fdp = crew["fdp_used_min"] + fdp_total
+    is_longhaul = pairing_block > 360
+    fdp_max = MAX_FDP_MIN_LONGHAUL if is_longhaul else MAX_FDP_MIN_2SECTOR
     if projected_fdp > fdp_max:
         warnings.append({
             "code": "FDP_EXCEED",
             "severity": "critical",
             "message": (
-                f"Flight Duty Period would reach {projected_fdp//60}h{projected_fdp%60:02d}m, "
-                f"exceeding the maximum {fdp_max//60}h FDP for this acclimatised report."
+                f"Flight Duty Period for this pairing ({pairing_sectors} sector{'s' if pairing_sectors>1 else ''}, "
+                f"{pairing_block//60}h{pairing_block%60:02d}m block) would reach "
+                f"{projected_fdp//60}h{projected_fdp%60:02d}m, exceeding the maximum "
+                f"{fdp_max//60}h FDP for this acclimatised report."
             ),
             "rule_ref": "ORO.FTL.205 / CS FTL.1.205",
         })
 
-    # 28-day block hours
-    projected_28d = crew["block_28d_hr"] + (block / 60)
+    # 28-day block hours (consider whole pairing)
+    projected_28d = crew["block_28d_hr"] + (pairing_block / 60)
     if projected_28d > MAX_BLOCK_28D_HR:
         warnings.append({
             "code": "BLOCK_28D",
@@ -394,7 +408,11 @@ def check_assignment(state: dict, flight_id: str, crew_id: str) -> list[dict]:
 
 
 def assign_crew(state: dict, flight_id: str, crew_id: str, force: bool = False) -> dict:
-    """Assign a crew member to a flight. Returns {ok, warnings, breaches}."""
+    """Assign a crew member to a flight. Returns {ok, warnings, breaches}.
+    Short-haul out-and-back pairings: if this flight has siblings sharing
+    `pairing_id`, the same crew is automatically rostered on the whole pairing
+    (this is how real short-haul operates — crew operate out & back).
+    """
     warnings = check_assignment(state, flight_id, crew_id)
     critical = [w for w in warnings if w["severity"] == "critical"]
     if critical and not force:
@@ -402,30 +420,52 @@ def assign_crew(state: dict, flight_id: str, crew_id: str, force: bool = False) 
 
     flight = next(f for f in state["flights"] if f["id"] == flight_id)
     crew = next(c for c in state["crew"] if c["id"] == crew_id)
-    if crew_id not in flight["assigned_crew_ids"]:
-        flight["assigned_crew_ids"].append(crew_id)
+
+    # All sectors in the same pairing — assign the crew to every sector
+    pairing_id = flight.get("pairing_id")
+    pairing_flights = [
+        f for f in state["flights"]
+        if pairing_id and f.get("pairing_id") == pairing_id
+    ] or [flight]
+
+    for pf in pairing_flights:
+        if crew_id not in pf["assigned_crew_ids"]:
+            pf["assigned_crew_ids"].append(crew_id)
     crew["assigned_flight_id"] = flight_id
     if crew["status"] not in ("standby", "off", "sick"):
         crew["status"] = "on_duty"
-    # If forced through a critical breach, log it
+
     if critical and force:
         state["kpis"]["legality_breaches"] += len(critical)
         state["kpis"]["score"] -= 80 * len(critical)
-    return {"ok": True, "warnings": warnings, "applied": True}
+    return {
+        "ok": True,
+        "warnings": warnings,
+        "applied": True,
+        "pairing_sectors": len(pairing_flights),
+    }
 
 
 def unassign_crew(state: dict, flight_id: str, crew_id: str) -> dict:
+    """Unassign a crew from a flight AND from any sibling sectors in the same
+    pairing (short-haul out-and-back is a single duty)."""
     flight = next((f for f in state["flights"] if f["id"] == flight_id), None)
     crew = next((c for c in state["crew"] if c["id"] == crew_id), None)
     if not flight or not crew:
         return {"ok": False}
-    if crew_id in flight["assigned_crew_ids"]:
-        flight["assigned_crew_ids"].remove(crew_id)
-    if crew["assigned_flight_id"] == flight_id:
+    pairing_id = flight.get("pairing_id")
+    pairing_flights = [
+        f for f in state["flights"]
+        if pairing_id and f.get("pairing_id") == pairing_id
+    ] or [flight]
+    for pf in pairing_flights:
+        if crew_id in pf["assigned_crew_ids"]:
+            pf["assigned_crew_ids"].remove(crew_id)
+    if crew["assigned_flight_id"] in [pf["id"] for pf in pairing_flights]:
         crew["assigned_flight_id"] = None
         if crew["status"] == "on_duty":
             crew["status"] = "available"
-    return {"ok": True}
+    return {"ok": True, "pairing_sectors": len(pairing_flights)}
 
 
 def roster_completeness(state: dict) -> dict:

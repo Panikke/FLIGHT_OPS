@@ -42,7 +42,7 @@ export default function AdvisorPanel({ state, busy, onAsk, lastResponse }) {
                 )}
             </div>
 
-            <form onSubmit={submit} className="border-t border-white/10 p-3 flex gap-2">
+            <form onSubmit={submit} className="border-t border-white/10 p-3 flex gap-2 mb-12">
                 <input
                     data-testid="advisor-input"
                     className="flex-1"

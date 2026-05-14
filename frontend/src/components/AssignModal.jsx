@@ -85,6 +85,28 @@ export default function AssignModal({ state, flight, onClose, onAssigned }) {
                         <div className="font-azeret text-lg">
                             {flight.callsign} · {flight.origin} → {flight.destination} · {flight.aircraft_type} ({flight.aircraft_reg})
                         </div>
+                        {(() => {
+                            const sibs = state.flights.filter(
+                                (f) => f.pairing_id && f.pairing_id === flight.pairing_id,
+                            );
+                            if (sibs.length > 1) {
+                                return (
+                                    <div className="uppercase-wide t-warn mt-1" data-testid="pairing-notice">
+                                        OUT-AND-BACK PAIRING · {sibs.length} sectors · same crew operates the lot:
+                                        {" "}
+                                        {sibs.map((s) => `${s.callsign} ${s.origin}-${s.destination}`).join(" · ")}
+                                    </div>
+                                );
+                            }
+                            if (flight.block_min > 360) {
+                                return (
+                                    <div className="uppercase-wide t-warn mt-1" data-testid="pairing-notice">
+                                        LONG-HAUL SECTOR · crew night-stops downroute, return next day
+                                    </div>
+                                );
+                            }
+                            return null;
+                        })()}
                     </div>
                     <div className="uppercase-wide t-sec">
                         STD {flight.std.slice(11, 16)}Z · BLK {Math.floor(flight.block_min / 60)}h{(flight.block_min % 60).toString().padStart(2, "0")}

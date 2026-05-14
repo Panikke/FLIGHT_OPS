@@ -72,6 +72,9 @@ function App() {
                 setPlaying(false); // auto-pause on new incident
                 setView("incidents");
             }
+        } catch (e) {
+            setPlaying(false);
+            setToast(`⚠ TICK FAILED: ${e?.message || "backend error"} — auto-paused`);
         } finally {
             setTicking(false);
         }

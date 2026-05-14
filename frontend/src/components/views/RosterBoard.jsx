@@ -23,6 +23,17 @@ export default function RosterBoard({ state, onOpenAssign, onStartDay, onUnassig
         return list;
     }, [state.flights, filter]);
 
+    // Group by pairing for visual grouping
+    const pairingsMap = useMemo(() => {
+        const m = new Map();
+        state.flights.forEach((f) => {
+            const k = f.pairing_id || f.id;
+            if (!m.has(k)) m.set(k, []);
+            m.get(k).push(f);
+        });
+        return m;
+    }, [state.flights]);
+
     const allComplete = state.flights.every((f) => {
         const req = f.required_crew;
         const total = req.CP + req.FO + req.SC + req.CC;
@@ -73,6 +84,7 @@ export default function RosterBoard({ state, onOpenAssign, onStartDay, onUnassig
                     <thead className="sticky top-0 bg-[#050505] z-10">
                         <tr className="uppercase-wide t-muted">
                             <th className="text-left px-3 py-2 border-b border-white/10">FLT</th>
+                            <th className="text-left px-3 py-2 border-b border-white/10">PAIRING</th>
                             <th className="text-left px-3 py-2 border-b border-white/10">ROUTE</th>
                             <th className="text-left px-3 py-2 border-b border-white/10">STD</th>
                             <th className="text-left px-3 py-2 border-b border-white/10">A/C</th>
@@ -102,6 +114,18 @@ export default function RosterBoard({ state, onOpenAssign, onStartDay, onUnassig
                                     data-testid={`row-${f.callsign}`}
                                 >
                                     <td className="px-3 py-2 t-info">{f.callsign}</td>
+                                    <td className="px-3 py-2 t-sec">
+                                        {(() => {
+                                            const sibs = pairingsMap.get(f.pairing_id) || [];
+                                            if (sibs.length <= 1) return <span className="t-muted">— single</span>;
+                                            const seq = sibs.findIndex((x) => x.id === f.id) + 1;
+                                            return (
+                                                <span className="t-warn" title="Same crew operates entire pairing">
+                                                    {seq}/{sibs.length} · {sibs.map((s) => `${s.origin}-${s.destination}`).join(" → ")}
+                                                </span>
+                                            );
+                                        })()}
+                                    </td>
                                     <td className="px-3 py-2">
                                         {f.origin} → {f.destination}
                                     </td>

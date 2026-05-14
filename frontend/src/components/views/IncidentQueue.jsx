@@ -9,7 +9,7 @@ const KIND_LABEL = {
 };
 
 export default function IncidentQueue({ state, onResolve, onAskAdvisor }) {
-    const [filter, setFilter] = useState("OPEN");
+    const [filter, setFilter] = useState("ALL");
     const incs = state.incidents.filter((i) =>
         filter === "OPEN" ? i.status === "open" : filter === "ALL" ? true : i.status === "resolved"
     );
