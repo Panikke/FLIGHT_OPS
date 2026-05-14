@@ -120,6 +120,73 @@ export default function Debrief({ state, onNewGame, onNextDay, nextDayBusy }) {
                 </div>
 
                 <div className="col-span-12 panel p-6">
+                    <div className="label-key mb-3">DAY {state.day_number || 1} FLIGHT BREAKDOWN ({state.flights.length})</div>
+                    <div className="scroll-area max-h-[320px]">
+                        <table className="w-full font-mono-jb text-xs">
+                            <thead className="sticky top-0 bg-[#0a0a0c] uppercase-wide t-muted">
+                                <tr>
+                                    <th className="text-left py-1 pr-3 border-b border-white/10">FLT</th>
+                                    <th className="text-left py-1 pr-3 border-b border-white/10">ROUTE</th>
+                                    <th className="text-left py-1 pr-3 border-b border-white/10">A/C</th>
+                                    <th className="text-right py-1 pr-3 border-b border-white/10">STD</th>
+                                    <th className="text-right py-1 pr-3 border-b border-white/10">BLK</th>
+                                    <th className="text-right py-1 pr-3 border-b border-white/10">DELAY</th>
+                                    <th className="text-right py-1 pr-3 border-b border-white/10">PAX</th>
+                                    <th className="text-right py-1 pr-3 border-b border-white/10">CREW</th>
+                                    <th className="text-left py-1 border-b border-white/10">STATUS</th>
+                                </tr>
+                            </thead>
+                            <tbody className="zebra">
+                                {[...state.flights]
+                                    .sort((a, b) => (a.std < b.std ? -1 : 1))
+                                    .map((f) => {
+                                        const req = f.required_crew;
+                                        const need = req.CP + req.FO + req.SC + req.CC;
+                                        const crewOk = f.assigned_crew_ids.length >= need;
+                                        const stTone =
+                                            f.status === "cancelled" || f.status === "diverted"
+                                                ? "t-crit"
+                                                : f.delay_min >= 60
+                                                  ? "t-crit"
+                                                  : f.delay_min > 15
+                                                    ? "t-warn"
+                                                    : "t-nominal";
+                                        const stLabel =
+                                            f.status === "cancelled"
+                                                ? "CANCELLED"
+                                                : f.status === "diverted"
+                                                  ? "DIVERTED"
+                                                  : f.status === "landed"
+                                                    ? "LANDED"
+                                                    : f.delay_min > 15
+                                                      ? `DLY +${f.delay_min}m`
+                                                      : "OTP";
+                                        return (
+                                            <tr key={f.id} className="border-b border-white/[0.04]">
+                                                <td className="py-1 pr-3 t-info">{f.callsign}</td>
+                                                <td className="py-1 pr-3">{f.origin}→{f.destination}</td>
+                                                <td className="py-1 pr-3 t-sec">{f.aircraft_type} {f.aircraft_reg}</td>
+                                                <td className="py-1 pr-3 text-right t-sec">{f.std.slice(11, 16)}</td>
+                                                <td className="py-1 pr-3 text-right t-sec">
+                                                    {Math.floor(f.block_min / 60)}h{(f.block_min % 60).toString().padStart(2, "0")}
+                                                </td>
+                                                <td className={`py-1 pr-3 text-right ${f.delay_min > 0 ? "t-warn" : "t-muted"}`}>
+                                                    {f.delay_min > 0 ? `+${f.delay_min}m` : "—"}
+                                                </td>
+                                                <td className="py-1 pr-3 text-right t-sec">{f.pax_count}</td>
+                                                <td className={`py-1 pr-3 text-right ${crewOk ? "t-nominal" : "t-crit"}`}>
+                                                    {f.assigned_crew_ids.length}/{need}
+                                                </td>
+                                                <td className={`py-1 ${stTone}`}>{stLabel}</td>
+                                            </tr>
+                                        );
+                                    })}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div className="col-span-12 panel p-6">
                     <div className="label-key">DAY {state.day_number || 1} DECISIONS LOG ({dec.length})</div>
                     <div className="mt-3 font-mono-jb text-xs scroll-area max-h-[280px]">
                         {dec.length === 0 && <div className="t-muted">No decisions recorded.</div>}

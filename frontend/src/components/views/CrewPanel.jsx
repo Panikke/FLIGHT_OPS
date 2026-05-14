@@ -1,5 +1,27 @@
 import React, { useState, useMemo } from "react";
 
+// Short-haul cap (780 min) used as the visual 100% reference
+const FDP_CAP_MIN = 780;
+
+function FdpBar({ fdpUsedMin }) {
+    const used = fdpUsedMin || 0;
+    const pct = Math.min(100, (used / FDP_CAP_MIN) * 100);
+    const color =
+        pct >= 90 ? "var(--status-critical)" : pct >= 70 ? "var(--status-warning)" : "var(--status-nominal)";
+    const label = `${Math.floor(used / 60)}h${(used % 60).toString().padStart(2, "0")}`;
+    return (
+        <div className="flex items-center gap-2 min-w-[80px]">
+            <div className="flex-1 h-1.5 bg-white/10 relative">
+                <div
+                    style={{ width: `${pct}%`, background: color }}
+                    className="absolute top-0 left-0 h-full transition-all"
+                />
+            </div>
+            <span className="font-mono-jb text-[10px] t-sec w-[32px] text-right">{label}</span>
+        </div>
+    );
+}
+
 export default function CrewPanel({ state }) {
     const [filter, setFilter] = useState("ALL");
     const [search, setSearch] = useState("");
@@ -86,8 +108,8 @@ export default function CrewPanel({ state }) {
                                     <td className="px-3 py-2 t-sec">{c.qualifications.join(",")}</td>
                                     <td className="px-3 py-2 t-sec">{c.base}</td>
                                     <td className="px-3 py-2 t-sec">{c.rest_hr_since_duty.toFixed(0)}h</td>
-                                    <td className="px-3 py-2 t-sec">
-                                        {Math.floor(c.fdp_used_min / 60)}h{(c.fdp_used_min % 60).toString().padStart(2, "0")}
+                                    <td className="px-3 py-2">
+                                        <FdpBar fdpUsedMin={c.fdp_used_min} />
                                     </td>
                                     <td className="px-3 py-2 t-sec">{c.block_28d_hr.toFixed(1)}</td>
                                     <td className={`px-3 py-2 ${c.fatigue_score > 70 ? "t-crit" : c.fatigue_score > 45 ? "t-warn" : "t-nominal"}`}>

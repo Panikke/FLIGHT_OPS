@@ -140,6 +140,12 @@ function App() {
         setView("incidents");
     }
 
+    async function autoRoster() {
+        const res = await api.autoRoster(state.id);
+        await refresh();
+        return res;
+    }
+
     async function askAdvisor(incidentId, question) {
         setAdvisorBusy(true);
         try {
@@ -246,6 +252,7 @@ function App() {
                             state={state}
                             onOpenAssign={(f) => setAssignTarget(f)}
                             onStartDay={startDay}
+                            onAutoRoster={autoRoster}
                         />
                     )}
                     {showView === "timeline" && <FlightTimeline state={state} />}

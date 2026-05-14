@@ -25,4 +25,6 @@ export const api = {
     nextDay: (gid) => client.post(`/sim/${gid}/next_day`).then((r) => r.data),
     advisor: (gid, payload = {}) =>
         client.post(`/sim/${gid}/advisor`, payload).then((r) => r.data),
+    autoRoster: (gid) =>
+        client.post(`/sim/${gid}/auto_roster`).then((r) => r.data),
 };
