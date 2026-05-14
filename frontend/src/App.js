@@ -159,6 +159,28 @@ function App() {
         setState(null);
     }
 
+    function exitToMenu() {
+        // Preserve saved campaign in localStorage so the user can resume from boot
+        if (state && state.phase === "OPS") {
+            if (!window.confirm("Exit to menu? The current day is in progress — it will be saved and you can RESUME from the boot screen.")) return;
+        }
+        setPlaying(false);
+        setView("roster");
+        setState(null);
+    }
+
+    async function resumeGame() {
+        const id = localStorage.getItem(STORAGE_KEY);
+        if (!id) return;
+        try {
+            const s = await api.getState(id);
+            setState(s);
+            setView(s.phase === "DEBRIEF" ? "debrief" : s.phase === "OPS" ? "incidents" : "roster");
+        } catch {
+            localStorage.removeItem(STORAGE_KEY);
+        }
+    }
+
     async function nextDay() {
         if (!state?.id) return;
         setNextDayBusy(true);
@@ -181,7 +203,7 @@ function App() {
     if (!state) {
         return (
             <div className="App">
-                <BootScreen onContinue={startNew} loading={loading} />
+                <BootScreen onContinue={startNew} loading={loading} onResume={resumeGame} />
             </div>
         );
     }
@@ -216,6 +238,7 @@ function App() {
                     state={state}
                     openIncidentCount={openIncidentCount}
                     rosterIncomplete={rosterIncomplete}
+                    onExitToMenu={exitToMenu}
                 />
                 <div className="flex-1 overflow-hidden">
                     {showView === "roster" && (

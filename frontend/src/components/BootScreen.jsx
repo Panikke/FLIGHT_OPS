@@ -11,14 +11,22 @@ const LOG_LINES = [
     "[WAIT] Awaiting Crew Controller input >>",
 ];
 
-export default function BootScreen({ onContinue, loading }) {
+export default function BootScreen({ onContinue, loading, onResume }) {
     const [shown, setShown] = useState(0);
     const [scenario, setScenario] = useState("free_play");
+    const [hasSaved, setHasSaved] = useState(false);
     useEffect(() => {
         if (shown >= LOG_LINES.length) return;
         const t = setTimeout(() => setShown((s) => s + 1), 140);
         return () => clearTimeout(t);
     }, [shown]);
+    useEffect(() => {
+        try {
+            setHasSaved(!!localStorage.getItem("egw_occ_game_id"));
+        } catch {
+            setHasSaved(false);
+        }
+    }, []);
 
     return (
         <div
@@ -95,7 +103,17 @@ export default function BootScreen({ onContinue, loading }) {
                         </div>
                     </div>
 
-                    <div className="mt-6 flex items-center gap-3">
+                    <div className="mt-6 flex items-center gap-3 flex-wrap">
+                        {hasSaved && onResume && (
+                            <button
+                                data-testid="boot-resume-btn"
+                                className="btn btn-ok"
+                                onClick={onResume}
+                                disabled={loading}
+                            >
+                                ▶ RESUME LAST CAMPAIGN
+                            </button>
+                        )}
                         <button
                             data-testid="boot-start-btn"
                             className="btn btn-primary"
@@ -105,7 +123,7 @@ export default function BootScreen({ onContinue, loading }) {
                             {loading ? "INITIALISING..." : scenario === "survive_7" ? ">> START CHALLENGE" : ">> START DUTY"}
                         </button>
                         <div className="uppercase-wide">
-                            {scenario === "survive_7" ? "7-day fixed-seed run" : "press start to spin up day 1"}
+                            {hasSaved ? "resume or start fresh — starting will overwrite the save" : scenario === "survive_7" ? "7-day fixed-seed run" : "press start to spin up day 1"}
                         </div>
                     </div>
                 </div>

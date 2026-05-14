@@ -9,7 +9,7 @@ const NAV = [
     { id: "regs", label: "FTL REGS" },
 ];
 
-export default function Sidebar({ active, onSelect, state, openIncidentCount, rosterIncomplete }) {
+export default function Sidebar({ active, onSelect, state, openIncidentCount, rosterIncomplete, onExitToMenu }) {
     return (
         <div className="panel-flush w-[180px] flex flex-col">
             <div className="px-3 py-3 border-b border-white/10">
@@ -55,6 +55,14 @@ export default function Sidebar({ active, onSelect, state, openIncidentCount, ro
                 <div className="t-info text-sm font-azeret mt-1">{state?.phase || "—"}</div>
                 <div className="t-muted mt-2">GAME</div>
                 <div className="font-mono-jb text-[10px] mt-1">{state?.id || "—"}</div>
+                <button
+                    data-testid="exit-to-menu-btn"
+                    className="btn btn-warn w-full mt-3"
+                    onClick={onExitToMenu}
+                    title="Return to main menu (current campaign saved)"
+                >
+                    ↺ EXIT TO MENU
+                </button>
             </div>
         </div>
     );
