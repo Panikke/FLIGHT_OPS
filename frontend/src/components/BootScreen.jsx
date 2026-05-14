@@ -13,6 +13,7 @@ const LOG_LINES = [
 
 export default function BootScreen({ onContinue, loading }) {
     const [shown, setShown] = useState(0);
+    const [scenario, setScenario] = useState("free_play");
     useEffect(() => {
         if (shown >= LOG_LINES.length) return;
         const t = setTimeout(() => setShown((s) => s + 1), 140);
@@ -72,17 +73,39 @@ export default function BootScreen({ onContinue, loading }) {
                         {shown < LOG_LINES.length && <div className="cursor-blink t-info" />}
                     </div>
 
+                    <div className="mt-6 border border-white/10 bg-black/40 p-4">
+                        <div className="label-key mb-3">SELECT SCENARIO</div>
+                        <div className="grid grid-cols-2 gap-3">
+                            <button
+                                data-testid="scenario-free-play"
+                                onClick={() => setScenario("free_play")}
+                                className={`text-left p-3 border ${scenario === "free_play" ? "border-[var(--status-info)] bg-[var(--status-info)]/10" : "border-white/20 hover:bg-white/5"}`}
+                            >
+                                <div className="font-azeret text-base">FREE PLAY</div>
+                                <div className="t-sec text-xs mt-1">Open-ended campaign. Roll the days until you retire or break the airline.</div>
+                            </button>
+                            <button
+                                data-testid="scenario-survive-7"
+                                onClick={() => setScenario("survive_7")}
+                                className={`text-left p-3 border ${scenario === "survive_7" ? "border-[var(--status-warning)] bg-[var(--status-warning)]/10" : "border-white/20 hover:bg-white/5"}`}
+                            >
+                                <div className="font-azeret text-base t-warn">SURVIVE 7 DAYS</div>
+                                <div className="t-sec text-xs mt-1">Fixed-seed challenge. Disruption escalates daily; storm midweek; AOG by day 7. Final grade at end.</div>
+                            </button>
+                        </div>
+                    </div>
+
                     <div className="mt-6 flex items-center gap-3">
                         <button
                             data-testid="boot-start-btn"
                             className="btn btn-primary"
-                            onClick={onContinue}
+                            onClick={() => onContinue(scenario)}
                             disabled={loading}
                         >
-                            {loading ? "INITIALISING..." : ">> START DUTY"}
+                            {loading ? "INITIALISING..." : scenario === "survive_7" ? ">> START CHALLENGE" : ">> START DUTY"}
                         </button>
                         <div className="uppercase-wide">
-                            press start to spin up day 1
+                            {scenario === "survive_7" ? "7-day fixed-seed run" : "press start to spin up day 1"}
                         </div>
                     </div>
                 </div>

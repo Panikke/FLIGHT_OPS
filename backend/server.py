@@ -67,9 +67,14 @@ async def root():
     return {"service": "OCC Sim", "ok": True, "time": datetime.now(timezone.utc).isoformat()}
 
 
+class NewGameReq(BaseModel):
+    scenario: Optional[str] = "free_play"
+
+
 @api_router.post("/sim/new")
-async def create_new_game():
-    state = sim.new_game()
+async def create_new_game(body: NewGameReq | None = None):
+    scenario = (body.scenario if body else "free_play") or "free_play"
+    state = sim.new_game(scenario=scenario)
     await _save(state)
     return state
 

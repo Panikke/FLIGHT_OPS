@@ -22,15 +22,42 @@ export default function Debrief({ state, onNewGame, onNextDay, nextDayBusy }) {
                     <div className="font-azeret text-3xl mt-1">CONTROLLER REPORT</div>
                 </div>
                 <div className="flex items-center gap-3">
-                    <button data-testid="next-day-btn" className="btn btn-primary" onClick={onNextDay} disabled={nextDayBusy}>
-                        {nextDayBusy ? "ROLLING..." : `▶ DAY ${(state.day_number || 1) + 1}`}
-                    </button>
-                    <button data-testid="debrief-new-game-btn" className="btn btn-warn" onClick={onNewGame}>
-                        ↺ NEW CAMPAIGN
-                    </button>
+                    {state.campaign_complete ? (
+                        <button data-testid="debrief-new-game-btn" className="btn btn-primary" onClick={onNewGame}>
+                            ↺ NEW CAMPAIGN
+                        </button>
+                    ) : (
+                        <>
+                            <button data-testid="next-day-btn" className="btn btn-primary" onClick={onNextDay} disabled={nextDayBusy}>
+                                {nextDayBusy ? "ROLLING..." : `▶ DAY ${(state.day_number || 1) + 1}${state.is_challenge ? ` / ${state.total_days}` : ""}`}
+                            </button>
+                            <button data-testid="debrief-new-game-btn" className="btn btn-warn" onClick={onNewGame}>
+                                ↺ NEW CAMPAIGN
+                            </button>
+                        </>
+                    )}
                 </div>
             </div>
             <div className="flex-1 scroll-area p-6 grid grid-cols-12 gap-6">
+                {state.campaign_complete && state.final_grade && (
+                    <div className="col-span-12 panel p-6" data-testid="final-grade-panel" style={{ borderTop: "2px solid var(--status-warning)" }}>
+                        <div className="flex items-end justify-between">
+                            <div>
+                                <div className="label-key">SURVIVE-7 CHALLENGE · FINAL VERDICT</div>
+                                <div className={`kpi-num text-6xl mt-2 ${state.final_grade.tone}`}>
+                                    {state.final_grade.label}
+                                </div>
+                                <div className="t-sec mt-3 max-w-xl">{state.final_grade.note}</div>
+                            </div>
+                            <div className="grid grid-cols-2 gap-x-8 gap-y-2 font-mono-jb text-sm">
+                                <div className="t-muted">DAYS COMPLETED</div><div className="t-info text-right">{state.final_grade.days_completed}</div>
+                                <div className="t-muted">CUMULATIVE SCORE</div><div className="t-info text-right">{state.final_grade.total_score}</div>
+                                <div className="t-muted">TOTAL BREACHES</div><div className={`text-right ${state.final_grade.total_breaches ? "t-crit" : "t-nominal"}`}>{state.final_grade.total_breaches}</div>
+                                <div className="t-muted">AVG OTP</div><div className="t-info text-right">{state.final_grade.avg_otp_pct}%</div>
+                            </div>
+                        </div>
+                    </div>
+                )}
                 <div className="col-span-4 panel p-6">
                     <div className="label-key">RATING</div>
                     <div className={`kpi-num text-7xl mt-2 ${r.tone}`}>{r.label}</div>

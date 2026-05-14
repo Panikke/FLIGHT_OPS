@@ -22,9 +22,11 @@ AIRLINE = {
 }
 
 AIRCRAFT_TYPES = {
-    "A320": {"seats": 180, "haul": "short", "max_block_hr": 6},
-    "A350": {"seats": 325, "haul": "long", "max_block_hr": 14},
-    "B777": {"seats": 350, "haul": "long", "max_block_hr": 15},
+    # crew_rest_class: "none" | "class_3" (seat) | "class_2" (recliner) | "class_1" (bunk)
+    # Class 1 bunks + augmented crew allow extended FDP (per CS-FTL.1.205(d))
+    "A320": {"seats": 180, "haul": "short", "max_block_hr": 6, "crew_rest_class": "none"},
+    "A350": {"seats": 325, "haul": "long", "max_block_hr": 14, "crew_rest_class": "class_1"},
+    "B777": {"seats": 350, "haul": "long", "max_block_hr": 15, "crew_rest_class": "class_1"},
 }
 
 # Fleet: tail registrations
@@ -66,10 +68,26 @@ CREW_NAMES = [
 # ------------------- Rules constants ------------------- #
 MIN_REST_HOME_HR = 12
 MIN_REST_AWAY_HR = 10
-MAX_FDP_MIN_2SECTOR = 13 * 60
-MAX_FDP_MIN_LONGHAUL = 16 * 60  # augmented crew + rest facility extends FDP
+MAX_FDP_MIN_2SECTOR = 13 * 60         # short-haul, unaugmented
+MAX_FDP_MIN_LONGHAUL_BASE = 14 * 60   # long-haul unaugmented
+MAX_FDP_MIN_LONGHAUL_BUNK = 18 * 60   # long-haul, augmented crew + Class 1 bunks
 MAX_BLOCK_28D_HR = 100
 MAX_DUTY_7D_HR = 60
+
+
+def _fdp_cap_for_flight(flight: dict) -> tuple[int, str]:
+    """Return (max_fdp_min, basis_str) for a flight given aircraft + crew complement."""
+    ac_type = flight["aircraft_type"]
+    block = flight["block_min"]
+    if block <= 360:
+        return MAX_FDP_MIN_2SECTOR, "short-haul, 2-sector acclimatised"
+    # Long-haul
+    rest_class = AIRCRAFT_TYPES.get(ac_type, {}).get("crew_rest_class", "none")
+    req = flight.get("required_crew", {})
+    augmented = req.get("CP", 1) >= 2 and req.get("FO", 1) >= 2
+    if augmented and rest_class == "class_1":
+        return MAX_FDP_MIN_LONGHAUL_BUNK, f"long-haul augmented crew + Class 1 bunks ({ac_type})"
+    return MAX_FDP_MIN_LONGHAUL_BASE, f"long-haul ({ac_type}) without bunk/augment extension"
 
 # ------------------- Helpers ------------------- #
 
@@ -219,11 +237,12 @@ def _make_flight(fnum, origin, dest, std, sta, block, ac, pairing_id):
 def _required_crew_for(ac_type: str, block_min: int) -> dict:
     if ac_type == "A320":
         return {"CP": 1, "FO": 1, "SC": 1, "CC": 3, "type_qual": "A320"}
-    # Long-haul: 2 captains if block > 10h
-    cps = 2 if block_min > 600 else 1
+    # Long-haul: augmented crew (2 CP + 2 FO) on sectors that need extended FDP.
+    # Threshold ~9h block ≈ projected FDP > 11h → augmentation needed.
+    augmented = block_min > 540  # >9h
     return {
-        "CP": cps,
-        "FO": 2,
+        "CP": 2 if augmented else 1,
+        "FO": 2 if augmented else 2,  # long-haul always 2 FOs
         "SC": 1,
         "CC": 7 if ac_type == "B777" else 6,
         "type_qual": ac_type,
@@ -232,9 +251,16 @@ def _required_crew_for(ac_type: str, block_min: int) -> dict:
 
 # ------------------- Game state factory ------------------- #
 
-def new_game(scenario: str = "default") -> dict:
-    """Create a fresh game state."""
-    random.seed()
+def new_game(scenario: str = "free_play") -> dict:
+    """Create a fresh game state.
+    scenario: 'free_play' (open-ended) or 'survive_7' (7-day fixed-seed challenge)
+    """
+    is_challenge = scenario == "survive_7"
+    if is_challenge:
+        # Fixed seed makes the challenge reproducible (and leaderboard-able)
+        random.seed(20260514)
+    else:
+        random.seed()
     # Day clock anchored at 04:00 UTC today
     today = datetime.now(timezone.utc).replace(hour=4, minute=0, second=0, microsecond=0)
     day_start_iso = today.isoformat()
@@ -289,24 +315,44 @@ def new_game(scenario: str = "default") -> dict:
         },
         # Crew downroute (waiting for tomorrow's return)
         "outstation_crew": [],   # list of {crew_id, station, flight_id_to_return}
+        # Scenario / challenge mode
+        "is_challenge": is_challenge,
+        "total_days": 7 if is_challenge else None,
+        "campaign_complete": False,
+        "final_grade": None,
     }
     return state
 
 
 # ------------------- Multi-day campaign ------------------- #
 
+def _final_grade(ck: dict) -> dict:
+    """Compute final challenge grade based on campaign KPIs."""
+    score = ck.get("total_score", 0)
+    breaches = ck.get("total_breaches", 0)
+    avg_otp = ck.get("avg_otp_pct", 0)
+    days = ck.get("days_completed", 0)
+    if breaches >= 10 or score <= 0:
+        label, tone, note = "FAILED", "t-crit", "Authority audit triggered. Operating certificate at risk."
+    elif breaches >= 5 or avg_otp < 60:
+        label, tone, note = "MARGINAL", "t-warn", "You survived, but the regulator wrote you up."
+    elif score >= 5500 and breaches == 0 and avg_otp >= 85:
+        label, tone, note = "DISTINGUISHED", "t-nominal", "Textbook campaign. Promoted to Head of Crew Control."
+    elif score >= 4000 and avg_otp >= 75:
+        label, tone, note = "PASS", "t-nominal", "A clean, professional week. The CEO sends congratulations."
+    else:
+        label, tone, note = "WEAK PASS", "t-warn", "You got through it. Just."
+    return {
+        "label": label, "tone": tone, "note": note,
+        "total_score": score, "total_breaches": breaches,
+        "avg_otp_pct": avg_otp, "days_completed": days,
+    }
+
+
 def advance_to_next_day(state: dict) -> dict:
     """Roll the simulation to the next operational day.
-    - Capture today's KPIs into campaign_kpis
-    - Update crew 28-day block hours (sliding window via block_history list)
-    - Decay/refresh fatigue based on whether crew operated today
-    - Reset FDP counters
-    - Recover most sick crew (probabilistic)
-    - Identify long-haul crew downroute, mark them for tomorrow's return sectors
-    - Generate tomorrow's flights:
-        * Short-haul: new random out-and-back pairings
-        * Long-haul RETURNS: yesterday's outbounds reversed, pre-rostered with the same crew set
-        * Long-haul NEW outbounds: for any long-haul aircraft not at LHR (none, since they night-stop) — so only spare LH aircraft get new outbounds
+    If is_challenge and current day == total_days: finalize the campaign instead
+    (no further day generated; set campaign_complete and final_grade).
     """
     # Capture today
     day_kpis = dict(state["kpis"])
@@ -330,6 +376,19 @@ def advance_to_next_day(state: dict) -> dict:
         ck["avg_otp_pct"] = round(
             sum(d["otp"] for d in ck["per_day"]) / len(ck["per_day"]), 1
         )
+
+    # Challenge mode: campaign complete after total_days
+    if state.get("is_challenge") and state.get("day_number", 1) >= state.get("total_days", 7):
+        state["campaign_complete"] = True
+        state["final_grade"] = _final_grade(ck)
+        # Keep phase at DEBRIEF (player can review and start new campaign)
+        return {
+            "day_number": state["day_number"],
+            "pre_rostered_returns": 0,
+            "campaign_kpis": ck,
+            "campaign_complete": True,
+            "final_grade": state["final_grade"],
+        }
 
     # Per-crew block flown today
     today_block_by_crew: dict[str, float] = {}
@@ -599,8 +658,7 @@ def check_assignment(state: dict, flight_id: str, crew_id: str) -> list[dict]:
     pairing_sectors = len(pairing_flights)
     fdp_total = pairing_block + 60 + 30 + (pairing_sectors - 1) * 60  # 60-min turnaround per sector change
     projected_fdp = crew["fdp_used_min"] + fdp_total
-    is_longhaul = pairing_block > 360
-    fdp_max = MAX_FDP_MIN_LONGHAUL if is_longhaul else MAX_FDP_MIN_2SECTOR
+    fdp_max, basis = _fdp_cap_for_flight(flight)
     if projected_fdp > fdp_max:
         warnings.append({
             "code": "FDP_EXCEED",
@@ -609,7 +667,7 @@ def check_assignment(state: dict, flight_id: str, crew_id: str) -> list[dict]:
                 f"Flight Duty Period for this pairing ({pairing_sectors} sector{'s' if pairing_sectors>1 else ''}, "
                 f"{pairing_block//60}h{pairing_block%60:02d}m block) would reach "
                 f"{projected_fdp//60}h{projected_fdp%60:02d}m, exceeding the maximum "
-                f"{fdp_max//60}h FDP for this acclimatised report."
+                f"{fdp_max//60}h FDP applicable ({basis})."
             ),
             "rule_ref": "ORO.FTL.205 / CS FTL.1.205",
         })
@@ -742,6 +800,19 @@ INCIDENT_TYPES = [
 ]
 
 
+# Survive-7 difficulty curve: per-tick max incidents weighted [0,1,2,3]
+# Day 1 mild → Day 7 brutal. Used only in challenge mode.
+SURVIVE_7_CURVE = {
+    1: {"weights": [60, 30, 10, 0],  "weather_mult": 1.0, "tech_mult": 1.0, "sick_mult": 1.0},
+    2: {"weights": [55, 32, 12, 1],  "weather_mult": 1.1, "tech_mult": 1.0, "sick_mult": 1.0},
+    3: {"weights": [45, 35, 17, 3],  "weather_mult": 1.3, "tech_mult": 1.2, "sick_mult": 1.1},
+    4: {"weights": [35, 38, 22, 5],  "weather_mult": 1.6, "tech_mult": 1.4, "sick_mult": 1.3},
+    5: {"weights": [20, 35, 30, 15], "weather_mult": 2.2, "tech_mult": 1.6, "sick_mult": 1.5},
+    6: {"weights": [15, 30, 35, 20], "weather_mult": 2.0, "tech_mult": 2.0, "sick_mult": 1.6},
+    7: {"weights": [10, 25, 35, 30], "weather_mult": 1.8, "tech_mult": 2.5, "sick_mult": 1.8},
+}
+
+
 def tick(state: dict, minutes: int = 30) -> dict:
     """Advance the simulation clock by `minutes`. May spawn incidents."""
     if state["phase"] != "OPS":
@@ -751,12 +822,28 @@ def tick(state: dict, minutes: int = 30) -> dict:
     state["clock"] = clock.isoformat()
 
     new_incidents = []
-    # Spawn 0-2 incidents per tick weighted
-    n = random.choices([0, 1, 2], weights=[50, 35, 15])[0]
+    # Spawn incidents per tick, weighted (challenge mode: escalates with day)
+    if state.get("is_challenge"):
+        day = state.get("day_number", 1)
+        curve = SURVIVE_7_CURVE.get(day, SURVIVE_7_CURVE[7])
+        weights = curve["weights"]
+        type_weight_mult = {
+            "CREW_SICK": curve["sick_mult"],
+            "WEATHER": curve["weather_mult"],
+            "TECH": curve["tech_mult"],
+        }
+        n = random.choices([0, 1, 2, 3], weights=weights)[0]
+    else:
+        n = random.choices([0, 1, 2], weights=[50, 35, 15])[0]
+        type_weight_mult = {}
     for _ in range(n):
+        adj_weights = [
+            i[1] * type_weight_mult.get(i[0], 1.0)
+            for i in INCIDENT_TYPES
+        ]
         kind, _w, desc = random.choices(
             INCIDENT_TYPES,
-            weights=[i[1] for i in INCIDENT_TYPES],
+            weights=adj_weights,
             k=1
         )[0]
         # Pick an affected flight that has not yet departed

@@ -50,10 +50,10 @@ function App() {
         setState(s);
     }, [state?.id]);
 
-    async function startNew() {
+    async function startNew(scenario = "free_play") {
         setLoading(true);
         try {
-            const s = await api.newGame();
+            const s = await api.newGame(scenario);
             setState(s);
             localStorage.setItem(STORAGE_KEY, s.id);
             setView("roster");

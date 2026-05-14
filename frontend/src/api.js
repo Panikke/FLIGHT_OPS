@@ -6,7 +6,7 @@ export const API = `${BACKEND_URL}/api`;
 const client = axios.create({ baseURL: API, timeout: 60000 });
 
 export const api = {
-    newGame: () => client.post("/sim/new").then((r) => r.data),
+    newGame: (scenario = "free_play") => client.post("/sim/new", { scenario }).then((r) => r.data),
     getState: (gid) => client.get(`/sim/${gid}`).then((r) => r.data),
     rosterStatus: (gid) => client.get(`/sim/${gid}/roster_status`).then((r) => r.data),
     precheck: (gid, fid, crewId) =>

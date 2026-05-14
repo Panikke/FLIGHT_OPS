@@ -1,0 +1,34 @@
+{
+  "summary": "Iteration 5 testing of (a) Class-1 bunk + augmented-crew 18h FDP extension and (b) Survive-7 fixed-seed challenge mode. Created /app/backend/tests/test_survive7.py with 9 new tests; full suite is 30/30 green. Frontend E2E verified scenario selector, dynamic START label, DAY 1/7 → DAY 2/7 header rollover, and DISTINGUISHED final-grade panel with NEW CAMPAIGN button replacing NEXT DAY on campaign complete.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_survive7.py",
+    "/app/backend/tests/test_campaign.py",
+    "/app/backend/tests/test_occ_backend.py",
+    "/app/backend/tests/test_pairings.py",
+    "/app/test_reports/pytest/pytest_results.xml",
+    "/app/test_reports/pytest/pytest_survive7.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "simulation._required_crew_for: for long-haul, FO field is `2 if augmented else 2` — both branches resolve to 2 (long-haul always 2 FOs). Logic-correct but the ternary is dead code on the FO line; safe to simplify to `'FO': 2`. The CP doubling on >540min block is the actual augmentation gate.",
+    "simulation._fdp_cap_for_flight bases 'augmented' on required_crew CP>=2 AND FO>=2. Because long-haul base is already 2 FOs, augmentation gating effectively depends only on CP>=2 (i.e. block>540). Correct in practice; verified ULR (LHR-SIN 770, LHR-HKG 720) yields 18h cap with Class-1 bunks basis string.",
+    "Fixed seed 20260514 in new_game(survive_7) is set globally on random — subsequent free_play games started in the same process inherit a reseeded state via random.seed(). Acceptable but worth noting that test isolation/reproducibility could be tightened with a local Random() instance.",
+    "advance_to_next_day correctly short-circuits on day==total_days for challenge: sets campaign_complete + final_grade, returns without generating day 8, preserves phase=DEBRIEF. Verified end-to-end.",
+    "Difficulty curve: day 1 produced 5 incidents vs day 7 produced 32 incidents over 20 ticks — escalation confirmed.",
+    "Debrief.jsx correctly hides next-day-btn when state.campaign_complete is true and renders final-grade-panel only when both campaign_complete and final_grade are present (defensive)."
+  ],
+  "updated_files": ["/app/backend/tests/test_survive7.py (new - 9 tests)"],
+  "success_rate": {"backend": "100% (30/30 pytest)", "frontend": "100% (boot, scenario toggle, DAY N/7 header, final-grade-panel, NEW CAMPAIGN button)"},
+  "test_credentials": "None (no-login game)",
+  "seed_data_creation": "Each test creates fresh game via POST /api/sim/new. The 7-day full-loop test cycles start_day → end_day → next_day x7 to reach campaign_complete.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iteration 5 is fully green. New backend tests live in /app/backend/tests/test_survive7.py. To re-run regression: pytest backend/tests/ -v. Survive-7 game can be fast-forwarded by repeatedly POSTing start_day→end_day→next_day; campaign_complete=true is emitted on the 7th next_day call. To set up the frontend final-grade-panel directly, drive the API to a day-7 complete state then write the game id to localStorage 'egw_occ_game_id' and reload.",
+  "rca of the issue": "N/A - no defects. All iteration-5 deliverables verified: (1) AIRCRAFT_TYPES A350/B777 expose crew_rest_class='class_1'; A320='none'. (2) _required_crew_for returns CP=2 FO=2 for block_min>540 long-haul. (3) _fdp_cap_for_flight returns (18*60, '... Class 1 bunks (A350|B777)') for ULR augmented long-haul; (14*60, '... without bunk/augment extension') for unaugmented long-haul; (13*60, 'short-haul, 2-sector acclimatised') for short-haul. (4) survive_7 game seeds reproducible (same crew/flight ids across two new_game calls). (5) free_play default unaffected, is_challenge=false, total_days=null. (6) Difficulty curve verified: 5 → 32 incidents from day 1 → day 7. (7) Day-7 next_day emits campaign_complete=true with final_grade {label,tone,note,total_score,total_breaches,avg_otp_pct,days_completed}; phase stays DEBRIEF; no day 8. (8) Frontend BootScreen scenario-free-play/scenario-survive-7 buttons present; default START DUTY, toggles to START CHALLENGE on survive-7. (9) HeaderBar shows 'DAY N / 7' in challenge mode. (10) Debrief.jsx renders final-grade-panel with DISTINGUISHED label and replaces next-day-btn with NEW CAMPAIGN button when campaign_complete."
+}
