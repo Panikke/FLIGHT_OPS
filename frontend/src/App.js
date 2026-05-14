@@ -26,6 +26,7 @@ function App() {
     const [toast, setToast] = useState(null);
     const [playing, setPlaying] = useState(false);
     const [speed, setSpeed] = useState(2); // 1=1×, 2=2×, 3=5×, 4=15×
+    const [nextDayBusy, setNextDayBusy] = useState(false);
 
     // Restore prior session if exists
     useEffect(() => {
@@ -147,6 +148,25 @@ function App() {
         setState(null);
     }
 
+    async function nextDay() {
+        if (!state?.id) return;
+        setNextDayBusy(true);
+        try {
+            const res = await api.nextDay(state.id);
+            await refresh();
+            setView("roster");
+            if (res.pre_rostered_returns > 0) {
+                setToast(`▶ DAY ${res.day_number} · ${res.pre_rostered_returns} long-haul return(s) auto-rostered with yesterday's crew`);
+            } else {
+                setToast(`▶ DAY ${res.day_number} commenced`);
+            }
+        } catch (e) {
+            setToast(`⚠ Failed to roll day: ${e?.message}`);
+        } finally {
+            setNextDayBusy(false);
+        }
+    }
+
     if (!state) {
         return (
             <div className="App">
@@ -211,7 +231,14 @@ function App() {
                         />
                     )}
                     {showView === "regs" && <RegsHelp />}
-                    {showView === "debrief" && <Debrief state={state} onNewGame={newGame} />}
+                    {showView === "debrief" && (
+                        <Debrief
+                            state={state}
+                            onNewGame={newGame}
+                            onNextDay={nextDay}
+                            nextDayBusy={nextDayBusy}
+                        />
+                    )}
                 </div>
             </div>
 

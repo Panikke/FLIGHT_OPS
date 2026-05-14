@@ -139,6 +139,11 @@ export default function RosterBoard({ state, onOpenAssign, onStartDay, onUnassig
                                     <td className="px-3 py-2 t-sec">{f.pax_count}</td>
                                     <td className="px-3 py-2 t-sec">
                                         CP{req.CP} FO{req.FO} SC{req.SC} CC{req.CC}
+                                        {f.note && f.note.includes("RETURN FROM NIGHT-STOP") && (
+                                            <div className="uppercase-wide t-warn mt-0.5" data-testid={`prerostered-${f.callsign}`}>
+                                                PRE-ROSTERED · NIGHT-STOP RETURN
+                                            </div>
+                                        )}
                                     </td>
                                     <td className="px-3 py-2">
                                         <span className={have >= need ? "t-nominal" : "t-warn"}>

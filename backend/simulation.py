@@ -276,8 +276,241 @@ def new_game(scenario: str = "default") -> dict:
         "phase": "ROSTER",                     # ROSTER | OPS | DEBRIEF
         "tick_count": 0,
         "advisor_history": [],
+        # ---- Multi-day campaign tracking ----
+        "day_number": 1,
+        "campaign_kpis": {
+            "days_completed": 0,
+            "total_score": 0,
+            "total_breaches": 0,
+            "total_cost_usd": 0,
+            "total_pax_disrupted": 0,
+            "avg_otp_pct": 0.0,
+            "per_day": [],   # list of {day, score, otp, breaches, cost}
+        },
+        # Crew downroute (waiting for tomorrow's return)
+        "outstation_crew": [],   # list of {crew_id, station, flight_id_to_return}
     }
     return state
+
+
+# ------------------- Multi-day campaign ------------------- #
+
+def advance_to_next_day(state: dict) -> dict:
+    """Roll the simulation to the next operational day.
+    - Capture today's KPIs into campaign_kpis
+    - Update crew 28-day block hours (sliding window via block_history list)
+    - Decay/refresh fatigue based on whether crew operated today
+    - Reset FDP counters
+    - Recover most sick crew (probabilistic)
+    - Identify long-haul crew downroute, mark them for tomorrow's return sectors
+    - Generate tomorrow's flights:
+        * Short-haul: new random out-and-back pairings
+        * Long-haul RETURNS: yesterday's outbounds reversed, pre-rostered with the same crew set
+        * Long-haul NEW outbounds: for any long-haul aircraft not at LHR (none, since they night-stop) — so only spare LH aircraft get new outbounds
+    """
+    # Capture today
+    day_kpis = dict(state["kpis"])
+    ck = state.setdefault("campaign_kpis", {
+        "days_completed": 0, "total_score": 0, "total_breaches": 0,
+        "total_cost_usd": 0, "total_pax_disrupted": 0, "avg_otp_pct": 0.0, "per_day": []
+    })
+    ck["days_completed"] += 1
+    ck["total_score"] += day_kpis["score"]
+    ck["total_breaches"] += day_kpis["legality_breaches"]
+    ck["total_cost_usd"] += day_kpis["cost_usd"]
+    ck["total_pax_disrupted"] += day_kpis["pax_disrupted"]
+    ck["per_day"].append({
+        "day": state.get("day_number", 1),
+        "score": day_kpis["score"],
+        "otp": day_kpis["otp_pct"],
+        "breaches": day_kpis["legality_breaches"],
+        "cost": day_kpis["cost_usd"],
+    })
+    if ck["per_day"]:
+        ck["avg_otp_pct"] = round(
+            sum(d["otp"] for d in ck["per_day"]) / len(ck["per_day"]), 1
+        )
+
+    # Per-crew block flown today
+    today_block_by_crew: dict[str, float] = {}
+    long_haul_assignments: dict[str, dict] = {}  # crew_id -> {station, route_back, ...}
+    for f in state["flights"]:
+        if f["status"] == "cancelled":
+            continue
+        block_hr = f["block_min"] / 60.0
+        for cid in f["assigned_crew_ids"]:
+            today_block_by_crew[cid] = today_block_by_crew.get(cid, 0) + block_hr
+        # Long-haul outbound — crew is now downroute and must operate the return tomorrow
+        if f["aircraft_type"] in ("A350", "B777") and f["status"] != "cancelled":
+            for cid in f["assigned_crew_ids"]:
+                long_haul_assignments[cid] = {
+                    "station": f["destination"],
+                    "origin": f["destination"],
+                    "destination": f["origin"],
+                    "block_min": f["block_min"],
+                    "aircraft_reg": f["aircraft_reg"],
+                    "aircraft_type": f["aircraft_type"],
+                }
+
+    # Update crew
+    for c in state["crew"]:
+        flown = today_block_by_crew.get(c["id"], 0)
+        c.setdefault("block_history", [])
+        c["block_history"].append(flown)
+        # keep sliding window of last 28 days
+        if len(c["block_history"]) > 28:
+            c["block_history"] = c["block_history"][-28:]
+        c["block_28d_hr"] = round(sum(c["block_history"]), 1)
+        c["fdp_used_min"] = 0
+        # Fatigue update
+        if flown > 0:
+            c["fatigue_score"] = min(100, c["fatigue_score"] + random.randint(8, 18))
+        else:
+            c["fatigue_score"] = max(5, c["fatigue_score"] - random.randint(6, 12))
+        # Rest
+        c["rest_hr_since_duty"] = round(random.uniform(11, 30), 1) if flown == 0 else round(random.uniform(12, 18), 1)
+        # Recover most sick crew
+        if c["status"] == "sick":
+            if random.random() < 0.7:
+                c["status"] = "available"
+        else:
+            # Clear assignment for tomorrow (will be re-rostered)
+            c["assigned_flight_id"] = None
+            c["status"] = "available"
+        # Sickness risk drift
+        if c["fatigue_score"] > 70 and random.random() < 0.05:
+            c["status"] = "sick"
+
+    # Re-establish standby pool (~10% of pool from those still available)
+    available = [c for c in state["crew"] if c["status"] == "available"]
+    random.shuffle(available)
+    standby_count = 0
+    for c in available:
+        if c["rank"] in ("CP", "FO") and standby_count < 4:
+            c["status"] = "standby"
+            standby_count += 1
+        elif c["rank"] in ("SC", "CC") and standby_count < 14:
+            c["status"] = "standby"
+            standby_count += 1
+
+    # Advance the day clock
+    today_dt = datetime.fromisoformat(state["day_start"])
+    next_day_dt = today_dt + timedelta(days=1)
+    next_day_iso = next_day_dt.isoformat()
+
+    # Generate tomorrow's flights
+    new_flights = _generate_next_day_flights(next_day_iso, long_haul_assignments, state["crew"])
+
+    # Pre-roster long-haul returns with yesterday's crew
+    pre_rostered = 0
+    for f in new_flights:
+        if f.get("prerostered_crew_ids"):
+            f["assigned_crew_ids"] = list(f["prerostered_crew_ids"])
+            # Mark those crew on duty
+            for cid in f["assigned_crew_ids"]:
+                cmem = next((c for c in state["crew"] if c["id"] == cid), None)
+                if cmem:
+                    cmem["status"] = "on_duty"
+                    cmem["assigned_flight_id"] = f["id"]
+            pre_rostered += 1
+        f.pop("prerostered_crew_ids", None)
+
+    # Roll state
+    state["day_number"] = state.get("day_number", 1) + 1
+    state["day_start"] = next_day_iso
+    state["clock"] = next_day_iso
+    state["flights"] = new_flights
+    state["incidents"] = []
+    state["decisions_log"] = []
+    state["tick_count"] = 0
+    state["phase"] = "ROSTER"
+    state["kpis"] = {
+        "otp_pct": 100.0,
+        "legality_breaches": 0,
+        "fatigue_index": int(sum(c["fatigue_score"] for c in state["crew"]) / max(1, len(state["crew"]))),
+        "cost_usd": 0,
+        "pax_delay_min": 0,
+        "pax_disrupted": 0,
+        "score": 1000,
+    }
+    return {
+        "day_number": state["day_number"],
+        "pre_rostered_returns": pre_rostered,
+        "campaign_kpis": ck,
+    }
+
+
+def _generate_next_day_flights(day_start_iso: str, long_haul_returns: dict, crew_list: list[dict]) -> list[dict]:
+    """Generate tomorrow's flights.
+    `long_haul_returns` maps crew_id -> {station, origin, destination, block_min, aircraft_reg, aircraft_type}
+    Returns list of flight dicts; long-haul returns have `prerostered_crew_ids` set so they're auto-assigned.
+    """
+    flights: list[dict] = []
+    day_start = datetime.fromisoformat(day_start_iso)
+    fnum = 200
+
+    # Group long-haul returns by aircraft (the same aircraft brings the crew back)
+    returns_by_reg: dict[str, dict] = {}
+    crew_by_reg: dict[str, list[str]] = {}
+    for cid, info in long_haul_returns.items():
+        reg = info["aircraft_reg"]
+        returns_by_reg[reg] = info
+        crew_by_reg.setdefault(reg, []).append(cid)
+
+    # Long-haul returns — depart from outstation early in the day (1-4h after day start)
+    long_haul_regs_used: set[str] = set()
+    for reg, info in returns_by_reg.items():
+        depart_min = random.randint(60, 240)
+        std = (day_start + timedelta(minutes=depart_min)).isoformat()
+        sta = _add_minutes_to_clock(std, info["block_min"])
+        pairing_id = _hash_id("PAIR")
+        ac = {"reg": reg, "type": info["aircraft_type"]}
+        f = _make_flight(fnum, info["origin"], info["destination"], std, sta, info["block_min"], ac, pairing_id)
+        f["prerostered_crew_ids"] = crew_by_reg.get(reg, [])
+        f["note"] = "RETURN FROM NIGHT-STOP · crew pre-rostered"
+        flights.append(f)
+        long_haul_regs_used.add(reg)
+        fnum += 2
+
+    # Short-haul: every A320 does new out-and-backs from LHR
+    for ac in FLEET:
+        if ac["type"] != "A320":
+            continue
+        depart_min = random.randint(0, 180)
+        rotations = random.choice([2, 3])
+        for _ in range(rotations):
+            origin, dest, block = random.choice(ROUTES_SHORT)
+            pairing_id = _hash_id("PAIR")
+            std = (day_start + timedelta(minutes=depart_min)).isoformat()
+            sta = _add_minutes_to_clock(std, block)
+            flights.append(_make_flight(fnum, origin, dest, std, sta, block, ac, pairing_id))
+            fnum += 2
+            depart_min += block + 60
+            std2 = (day_start + timedelta(minutes=depart_min)).isoformat()
+            sta2 = _add_minutes_to_clock(std2, block)
+            flights.append(_make_flight(fnum, dest, origin, std2, sta2, block, ac, pairing_id))
+            fnum += 2
+            depart_min += block + 60
+
+    # Long-haul NEW outbounds: any LH aircraft NOT used for a return (i.e. it's at LHR)
+    for ac in FLEET:
+        if ac["type"] == "A320":
+            continue
+        if ac["reg"] in long_haul_regs_used:
+            continue  # this aircraft is downroute returning, no new outbound today
+        choices = [r for r in ROUTES_LONG if r[3] == ac["type"]]
+        if not choices:
+            continue
+        origin, dest, block, _type_pref = random.choice(choices)
+        depart_min = random.randint(0, 180)
+        std = (day_start + timedelta(minutes=depart_min)).isoformat()
+        sta = _add_minutes_to_clock(std, block)
+        pairing_id = _hash_id("PAIR")
+        flights.append(_make_flight(fnum, origin, dest, std, sta, block, ac, pairing_id))
+        fnum += 2
+
+    flights.sort(key=lambda f: f["std"])
+    return flights
 
 
 # ------------------- Legality / rule checks ------------------- #

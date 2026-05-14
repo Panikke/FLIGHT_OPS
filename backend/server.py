@@ -141,6 +141,16 @@ async def end_day(game_id: str):
     return result
 
 
+@api_router.post("/sim/{game_id}/next_day")
+async def next_day(game_id: str):
+    state = await _load(game_id)
+    if state["phase"] != "DEBRIEF":
+        raise HTTPException(status_code=400, detail="Must end the current day first")
+    result = sim.advance_to_next_day(state)
+    await _save(state)
+    return {**result, "state": state}
+
+
 @api_router.post("/sim/{game_id}/advisor")
 async def advisor(game_id: str, body: AdvisorReq):
     state = await _load(game_id)

@@ -21,6 +21,7 @@ export const api = {
     resolve: (gid, iid, action) =>
         client.post(`/sim/${gid}/resolve/${iid}`, { action }).then((r) => r.data),
     endDay: (gid) => client.post(`/sim/${gid}/end_day`).then((r) => r.data),
+    nextDay: (gid) => client.post(`/sim/${gid}/next_day`).then((r) => r.data),
     advisor: (gid, payload = {}) =>
         client.post(`/sim/${gid}/advisor`, payload).then((r) => r.data),
 };

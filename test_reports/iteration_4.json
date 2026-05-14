@@ -1,0 +1,50 @@
+{
+  "summary": "Iteration 4 testing of the multi-day campaign feature. Created /app/backend/tests/test_campaign.py covering the new POST /api/sim/{id}/next_day endpoint and all related state transitions (28-day sliding block window, fatigue carryover, long-haul night-stop return auto-rostering, campaign_kpis aggregation, day_start advance, phase guard). All 21 backend pytest tests pass (8 new campaign + 10 legacy occ_backend + 3 pairings). Frontend E2E walked: boot -> DAY 1 roster -> assign CP to long-haul A350 -> start_day -> tick x4 -> end_day -> DEBRIEF shows campaign-kpis panel -> click next-day-btn -> roster reloads with 'DAY 2' header -> prerostered-EGW200 tag 'PRE-ROSTERED \u00b7 NIGHT-STOP RETURN' visible -> 2nd day cycle increments campaign-kpis to '1 DAY COMPLETED' with day-by-day table populated for D1. All required deliverables verified.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "Debrief campaign-kpis panel",
+        "issues": [
+          "Minor UX inconsistency (not a bug per spec): on the END-OF-DAY-N debrief screen, campaign-kpis still shows 'N-1 DAYS COMPLETED' because days_completed is only incremented inside advance_to_next_day (when player clicks NEXT DAY). E.g. day-2 debrief shows '1 DAY COMPLETED'. Players might expect the day being debriefed to already be counted. Consider either renaming label to 'PRIOR DAYS COMPLETED' or incrementing days_completed in end_day instead of next_day."
+        ]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_campaign.py",
+    "/app/backend/tests/test_occ_backend.py",
+    "/app/backend/tests/test_pairings.py",
+    "/app/test_reports/pytest/pytest_results.xml",
+    "/app/test_reports/pytest/pytest_campaign.xml"
+  ],
+  "action_items": [
+    "Optional UX: clarify campaign-kpis 'DAYS COMPLETED' label OR increment days_completed inside end_day so the current debriefed day is already counted on the debrief screen.",
+    "Optional: literal 'OUT-BACK' string in RosterBoard PAIRING column (carried over from iteration 3 - still not addressed)."
+  ],
+  "critical_code_review_comments": [
+    "simulation.advance_to_next_day correctly orders operations: capture today's KPIs into campaign_kpis BEFORE resetting state; block_history sliding window correctly capped at 28; fatigue update polarity (operating crew +8..18, non-operating -6..12 with floor 5) matches the spec.",
+    "_generate_next_day_flights properly groups long-haul returns by aircraft_reg so multi-crew sets travel together; flight.note set to 'RETURN FROM NIGHT-STOP \u00b7 crew pre-rostered'.",
+    "server.next_day endpoint correctly enforces phase=DEBRIEF (HTTP 400 otherwise) and returns {day_number, pre_rostered_returns, campaign_kpis, state}.",
+    "Debrief.jsx campaign-kpis panel safely handles missing campaign_kpis with default {days_completed: 0, per_day: []} fallback. The next-day-btn correctly disables during nextDayBusy.",
+    "RosterBoard prerostered-{callsign} testid only renders when flight.note contains 'RETURN FROM NIGHT-STOP' - exact match with backend wording, so contract is tight."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_campaign.py (new - 8 campaign tests)"
+  ],
+  "success_rate": {
+    "backend": "100% (21/21 pytest, incl 8 new campaign tests)",
+    "frontend": "100% (full multi-day E2E verified end-to-end)"
+  },
+  "test_credentials": "None (no-login game)",
+  "seed_data_creation": "Each test creates a fresh game via POST /api/sim/new; test_campaign cycles through 2 days.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All multi-day campaign features green. Backend campaign tests live in /app/backend/tests/test_campaign.py. To re-run: pytest backend/tests/ -v. The single non-blocking UX nit (days_completed lag by one on debrief screen) is documented under design_issues. Long-haul night-stop selection in tests uses lowest block_min LH route to stay under FDP threshold (LHR-JFK ~430min is safest).",
+  "rca of the issue": "N/A - no defects. All five iteration-4 deliverables verified: (1) next_day endpoint guards phase=DEBRIEF and returns the documented payload; (2) long-haul outbound on day 1 produces a reverse-route flight on day 2 carrying the same crew_id with 'RETURN FROM NIGHT-STOP' note; (3) campaign_kpis.days_completed increments and per_day grows monotonically; (4) crew[].block_history is appended once per next_day call and block_28d_hr equals its sum; (5) operating crew fatigue increases, non-operating crew fatigue decreases. Frontend Debrief surfaces campaign-kpis panel, next-day-btn, and DAY-N header bumps correctly; RosterBoard tags prerostered-{callsign} for the day-2 return rows."
+}
