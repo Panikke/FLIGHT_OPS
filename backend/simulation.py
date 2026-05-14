@@ -242,7 +242,7 @@ def _required_crew_for(ac_type: str, block_min: int) -> dict:
     augmented = block_min > 540  # >9h
     return {
         "CP": 2 if augmented else 1,
-        "FO": 2 if augmented else 2,  # long-haul always 2 FOs
+        "FO": 2,  # long-haul always 2 FOs
         "SC": 1,
         "CC": 7 if ac_type == "B777" else 6,
         "type_qual": ac_type,

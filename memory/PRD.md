@@ -44,7 +44,9 @@ OVERRIDE: critical breaches can be forced; each force increments `kpis.legality_
 - 2026-05-14: **Realism — crew pairings**. Short-haul out-and-back operated by the same crew set (single `pairing_id`, single FDP, assign/unassign propagates across siblings). Long-haul is single-sector per day with crew night-stop.
 - 2026-05-14: **Multi-day campaign**. POST `/api/sim/{id}/next_day` rolls the day. Crew block hours kept in a 28-day sliding window (`crew[].block_history`). Fatigue increases for operating crew, decays for resting crew. Sick crew recover probabilistically. Standby pool refreshed each day. Long-haul crew at outstation are auto-rostered onto the next day's RETURN sector (note: "RETURN FROM NIGHT-STOP · crew pre-rostered"). Campaign KPIs (`days_completed`, cumulative score, per-day breakdown) shown in Debrief.
 - 2026-05-14: Bug fixes — IncidentQueue default filter ALL, Advisor send button no longer occluded, tick auto-pauses on backend error.
-- 2026-05-14: **Tests**: 21/21 pytest backend tests pass (8 campaign + 3 pairing + 10 legacy). Frontend full multi-day E2E verified end-to-end.
+- 2026-05-14: **Realism — Class 1 bunks + augmented crew**. Each aircraft type has a `crew_rest_class` field. A350 / B777 = `class_1` (bunks). Long-haul flights with block > 540 min auto-require 2 captains + 2 FOs (augmented). FDP cap = 18h for augmented long-haul on bunk-equipped aircraft, 14h for unaugmented long-haul, 13h for short-haul. Legality pre-check message references the basis.
+- 2026-05-14: **Survive 7 Days challenge mode**. POST `/api/sim/new` accepts `{scenario: 'survive_7'}` — fixed seed for reproducibility, total_days=7, escalating disruption curve (day 1 mild → day 7 brutal). After day 7 rollover, `campaign_complete: true`, `final_grade` computed (DISTINGUISHED / PASS / WEAK PASS / MARGINAL / FAILED). Boot screen scenario selector (Free Play vs Survive 7). Debrief shows final-grade-panel and replaces NEXT DAY with NEW CAMPAIGN.
+- 2026-05-14: **Tests**: 30/30 pytest backend tests pass (10 legacy + 3 pairing + 8 campaign + 9 survive-7).
 
 ## Backend endpoints
 - `GET /api/` – health
