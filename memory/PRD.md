@@ -41,9 +41,10 @@ OVERRIDE: critical breaches can be forced; each force increments `kpis.legality_
 - 2026-05-13: Assign Modal with crew search, rank filter, live legality pre-check, ASSIGN + OVERRIDE buttons
 - 2026-05-13: localStorage session persistence
 - 2026-05-13: **Time speed control** — PLAY/PAUSE + 4 speed levels (1×/2×/5×/15×). Auto-pauses on new incident or any open incident.
-- 2026-05-14: **Realism — crew pairings**. Short-haul out-and-back operated by the same crew set (single `pairing_id`, single FDP, assign/unassign propagates across siblings). Long-haul is single-sector per day with crew night-stop. AssignModal shows pairing notice. RosterBoard PAIRING column shows sector sequence.
-- 2026-05-14: Bug fixes — IncidentQueue default filter ALL (resolved cards stay visible), Advisor send button no longer occluded by Emergent badge, tick() auto-pauses on backend error.
-- 2026-05-14: Backend pytest 13/13 (10 legacy + 3 new pairing tests). Frontend full E2E walked through: boot → roster → assign with pairing notice → start-day → play (clock advanced) → tick → resolve incident → advisor with real Claude response → end-day → debrief.
+- 2026-05-14: **Realism — crew pairings**. Short-haul out-and-back operated by the same crew set (single `pairing_id`, single FDP, assign/unassign propagates across siblings). Long-haul is single-sector per day with crew night-stop.
+- 2026-05-14: **Multi-day campaign**. POST `/api/sim/{id}/next_day` rolls the day. Crew block hours kept in a 28-day sliding window (`crew[].block_history`). Fatigue increases for operating crew, decays for resting crew. Sick crew recover probabilistically. Standby pool refreshed each day. Long-haul crew at outstation are auto-rostered onto the next day's RETURN sector (note: "RETURN FROM NIGHT-STOP · crew pre-rostered"). Campaign KPIs (`days_completed`, cumulative score, per-day breakdown) shown in Debrief.
+- 2026-05-14: Bug fixes — IncidentQueue default filter ALL, Advisor send button no longer occluded, tick auto-pauses on backend error.
+- 2026-05-14: **Tests**: 21/21 pytest backend tests pass (8 campaign + 3 pairing + 10 legacy). Frontend full multi-day E2E verified end-to-end.
 
 ## Backend endpoints
 - `GET /api/` – health

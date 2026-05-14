@@ -51,7 +51,7 @@ export default function Debrief({ state, onNewGame, onNextDay, nextDayBusy }) {
                     <div className="flex items-end justify-between mb-4">
                         <div>
                             <div className="label-key">CAMPAIGN TO DATE</div>
-                            <div className="font-azeret text-xl mt-1">{ck.days_completed} DAY{ck.days_completed === 1 ? "" : "S"} COMPLETED</div>
+                            <div className="font-azeret text-xl mt-1">{ck.days_completed} DAY{ck.days_completed === 1 ? "" : "S"} COMPLETED · DAY {state.day_number || 1} IN DEBRIEF</div>
                         </div>
                         <div className="uppercase-wide t-sec">
                             CUMULATIVE SCORE <span className="kpi-num t-info ml-2 text-2xl">{ck.total_score}</span>
