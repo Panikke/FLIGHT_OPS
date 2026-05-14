@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useCallback } from "react";
 
 function fmtClock(iso) {
     if (!iso) return "--:--";
@@ -15,8 +15,22 @@ function flightStatus(f) {
     return { label: "OTP", tone: "t-nominal" };
 }
 
-export default function RosterBoard({ state, onOpenAssign, onStartDay, onUnassign }) {
+export default function RosterBoard({ state, onOpenAssign, onStartDay, onUnassign, onAutoRoster }) {
     const [filter, setFilter] = useState("ALL");
+    const [autoRostering, setAutoRostering] = useState(false);
+    const [autoResult, setAutoResult] = useState(null);
+
+    const handleAutoRoster = useCallback(async () => {
+        if (!onAutoRoster) return;
+        setAutoRostering(true);
+        setAutoResult(null);
+        try {
+            const res = await onAutoRoster();
+            setAutoResult(res);
+        } finally {
+            setAutoRostering(false);
+        }
+    }, [onAutoRoster]);
     const flights = useMemo(() => {
         let list = [...state.flights].sort((a, b) => (a.std < b.std ? -1 : 1));
         if (filter !== "ALL") list = list.filter((f) => f.aircraft_type === filter);
@@ -69,13 +83,32 @@ export default function RosterBoard({ state, onOpenAssign, onStartDay, onUnassig
                     INCOMPLETE: <span className="t-warn">{incomplete}</span>/{state.flights.length}
                 </div>
                 {state.phase === "ROSTER" && (
-                    <button
-                        data-testid="start-day-btn"
-                        className={`btn ${allComplete ? "btn-ok" : "btn-warn"} ml-4`}
-                        onClick={onStartDay}
-                    >
-                        {allComplete ? "▶ START DAY" : "▶ START DAY (gaps remain)"}
-                    </button>
+                    <>
+                        <button
+                            data-testid="auto-roster-btn"
+                            className="btn ml-2"
+                            onClick={handleAutoRoster}
+                            disabled={autoRostering || allComplete}
+                            title="Auto-assign qualified crew to all unfilled slots (legality-checked)"
+                        >
+                            {autoRostering ? "ROSTERING..." : "⚡ AUTO-ROSTER"}
+                        </button>
+                        {autoResult && (
+                            <div className="uppercase-wide ml-2" data-testid="auto-roster-result">
+                                <span className="t-nominal">+{autoResult.assigned} ASSIGNED</span>
+                                {autoResult.skipped > 0 && (
+                                    <span className="t-warn ml-2">{autoResult.skipped} GAPS REMAIN</span>
+                                )}
+                            </div>
+                        )}
+                        <button
+                            data-testid="start-day-btn"
+                            className={`btn ${allComplete ? "btn-ok" : "btn-warn"} ml-4`}
+                            onClick={onStartDay}
+                        >
+                            {allComplete ? "▶ START DAY" : "▶ START DAY (gaps remain)"}
+                        </button>
+                    </>
                 )}
             </div>
 

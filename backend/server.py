@@ -146,6 +146,16 @@ async def end_day(game_id: str):
     return result
 
 
+@api_router.post("/sim/{game_id}/auto_roster")
+async def auto_roster(game_id: str):
+    state = await _load(game_id)
+    if state["phase"] != "ROSTER":
+        raise HTTPException(status_code=400, detail="Auto-roster only available in ROSTER phase")
+    result = sim.auto_roster(state)
+    await _save(state)
+    return result
+
+
 @api_router.post("/sim/{game_id}/restart_day")
 async def restart_day(game_id: str):
     state = await _load(game_id)
@@ -189,7 +199,7 @@ async def advisor(game_id: str, body: AdvisorReq):
                 "is a SIMULATION, not an official compliance tool. Keep answers under 120 words. "
                 "Output plain text only (no markdown headings)."
             ),
-        ).with_model("anthropic", "claude-sonnet-4-5-20250929")
+        ).with_model("anthropic", "claude-sonnet-4-6")
         import json
         msg = UserMessage(text=f"OPERATIONAL STATE:\n{json.dumps(summary, indent=2)}\n\nREQUEST: {question}")
         text = await chat.send_message(msg)

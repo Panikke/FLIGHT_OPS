@@ -73,6 +73,7 @@ MAX_FDP_MIN_LONGHAUL_BASE = 14 * 60   # long-haul unaugmented
 MAX_FDP_MIN_LONGHAUL_BUNK = 18 * 60   # long-haul, augmented crew + Class 1 bunks
 MAX_BLOCK_28D_HR = 100
 MAX_DUTY_7D_HR = 60
+MAX_DUTY_7D_MIN = MAX_DUTY_7D_HR * 60
 
 
 def _fdp_cap_for_flight(flight: dict) -> tuple[int, str]:
@@ -672,6 +673,20 @@ def check_assignment(state: dict, flight_id: str, crew_id: str) -> list[dict]:
             "rule_ref": "ORO.FTL.205 / CS FTL.1.205",
         })
 
+    # 7-day duty hours
+    pairing_duty_hr = fdp_total / 60
+    projected_7d = crew.get("duty_7d_hr", 0) + pairing_duty_hr
+    if projected_7d > MAX_DUTY_7D_HR:
+        warnings.append({
+            "code": "DUTY_7D",
+            "severity": "critical",
+            "message": (
+                f"Projected 7-day duty = {projected_7d:.1f}h, exceeds the {MAX_DUTY_7D_HR}h weekly limit. "
+                f"Current accumulation: {crew.get('duty_7d_hr', 0):.1f}h."
+            ),
+            "rule_ref": "ORO.FTL.210(a) — 60h duty in 7 consecutive days",
+        })
+
     # 28-day block hours (consider whole pairing)
     projected_28d = crew["block_28d_hr"] + (pairing_block / 60)
     if projected_28d > MAX_BLOCK_28D_HR:
@@ -789,6 +804,90 @@ def roster_completeness(state: dict) -> dict:
     return {"total": total, "complete": complete, "missing": missing}
 
 
+# ------------------- Auto-roster ------------------- #
+
+def auto_roster(state: dict) -> dict:
+    """Greedy auto-assignment: fill all crew gaps without legality violations.
+    Processes each flight, each rank gap, picking the lowest-fatigue qualified
+    available/standby crew that passes a full legality check.
+    Returns counts of assigned slots, skipped slots, and which flights changed.
+    """
+    assigned_total = 0
+    skipped_total = 0
+    flights_touched: list[str] = []
+
+    # Collect pairing ids already processed so we don't double-count sibling sectors
+    processed_pairings: set[str] = set()
+
+    for flight in state["flights"]:
+        pid = flight.get("pairing_id")
+        if pid and pid in processed_pairings:
+            continue
+
+        req = flight["required_crew"]
+        type_q = req["type_qual"]
+
+        # Aggregate assigned ranks across all pairing sectors
+        pairing_flights = (
+            [f for f in state["flights"] if f.get("pairing_id") == pid]
+            if pid else [flight]
+        )
+        rank_counts: dict[str, int] = {"CP": 0, "FO": 0, "SC": 0, "CC": 0}
+        all_assigned_ids: set[str] = set()
+        for pf in pairing_flights:
+            for cid in pf["assigned_crew_ids"]:
+                all_assigned_ids.add(cid)
+        for cid in all_assigned_ids:
+            c = next((cc for cc in state["crew"] if cc["id"] == cid), None)
+            if c and c["rank"] in rank_counts:
+                rank_counts[c["rank"]] += 1
+
+        flight_changed = False
+        for rank in ("CP", "FO", "SC", "CC"):
+            gap = req[rank] - rank_counts[rank]
+            for _ in range(gap):
+                candidates = [
+                    c for c in state["crew"]
+                    if c["rank"] == rank
+                    and type_q in c["qualifications"]
+                    and c["status"] in ("available", "standby")
+                    and c["id"] not in all_assigned_ids
+                ]
+                # Prefer lowest fatigue, then most rested
+                candidates.sort(key=lambda c: (c["fatigue_score"], -c["rest_hr_since_duty"]))
+
+                placed = False
+                for candidate in candidates:
+                    warnings = check_assignment(state, flight["id"], candidate["id"])
+                    if not any(w["severity"] == "critical" for w in warnings):
+                        # Assign across all pairing sectors
+                        for pf in pairing_flights:
+                            if candidate["id"] not in pf["assigned_crew_ids"]:
+                                pf["assigned_crew_ids"].append(candidate["id"])
+                        candidate["assigned_flight_id"] = flight["id"]
+                        if candidate["status"] not in ("off", "sick"):
+                            candidate["status"] = "on_duty"
+                        all_assigned_ids.add(candidate["id"])
+                        rank_counts[rank] += 1
+                        assigned_total += 1
+                        flight_changed = True
+                        placed = True
+                        break
+                if not placed:
+                    skipped_total += 1
+
+        if flight_changed and flight["callsign"] not in flights_touched:
+            flights_touched.append(flight["callsign"])
+        if pid:
+            processed_pairings.add(pid)
+
+    return {
+        "assigned": assigned_total,
+        "skipped": skipped_total,
+        "flights_touched": flights_touched,
+    }
+
+
 # ------------------- Day-of-Ops simulation ------------------- #
 
 INCIDENT_TYPES = [
@@ -820,6 +919,35 @@ def tick(state: dict, minutes: int = 30) -> dict:
     state["tick_count"] += 1
     clock = datetime.fromisoformat(state["clock"]) + timedelta(minutes=minutes)
     state["clock"] = clock.isoformat()
+
+    # ---- Flight lifecycle progression ----
+    for f in state["flights"]:
+        if f["status"] in ("cancelled", "diverted", "landed"):
+            continue
+        delay = f.get("delay_min", 0)
+        std_dt = datetime.fromisoformat(f["std"]) + timedelta(minutes=delay)
+        sta_dt = datetime.fromisoformat(f["sta"]) + timedelta(minutes=delay)
+        if clock >= sta_dt:
+            prev = f["status"]
+            f["status"] = "landed"
+            # Accumulate FDP for crew on this flight when it lands
+            if prev != "landed":
+                for cid in f["assigned_crew_ids"]:
+                    c = next((cc for cc in state["crew"] if cc["id"] == cid), None)
+                    if c:
+                        c["fdp_used_min"] = c.get("fdp_used_min", 0) + f["block_min"]
+                        c["duty_7d_hr"] = round(
+                            c.get("duty_7d_hr", 0) + f["block_min"] / 60, 2
+                        )
+                        if c["status"] == "on_duty":
+                            c["status"] = "available"
+                        c["assigned_flight_id"] = None
+        elif clock >= std_dt:
+            if f["status"] not in ("airborne", "boarding"):
+                f["status"] = "airborne"
+        elif clock >= std_dt - timedelta(minutes=30):
+            if f["status"] == "scheduled":
+                f["status"] = "boarding"
 
     new_incidents = []
     # Spawn incidents per tick, weighted (challenge mode: escalates with day)
@@ -1070,6 +1198,7 @@ def restart_day(state: dict) -> dict:
     # Cleanest approach: if a crew was assigned to any flight, they're on_duty again
     assigned_ids = {cid for f in state["flights"] for cid in f["assigned_crew_ids"]}
     for c in state["crew"]:
+        c["fdp_used_min"] = 0  # reset FDP accumulation for the fresh restart
         if c["id"] in assigned_ids:
             c["status"] = "on_duty"
             # Make sure assigned_flight_id is set to one of the assigned flights
