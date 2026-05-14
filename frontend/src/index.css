@@ -2,114 +2,297 @@
 @tailwind components;
 @tailwind utilities;
 
-body {
-    margin: 0;
-    font-family:
-        -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen",
-        "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue",
-        sans-serif;
+:root {
+    --bg-void: #000000;
+    --bg-primary: #050505;
+    --bg-panel: #0a0a0c;
+    --bg-surface: #121214;
+    --border-grid: rgba(255, 255, 255, 0.06);
+    --border-panel: rgba(255, 255, 255, 0.12);
+    --border-strong: rgba(255, 255, 255, 0.22);
+    --txt-primary: #f4f4f5;
+    --txt-secondary: #a1a1aa;
+    --txt-muted: #52525b;
+    --status-nominal: #00e676;
+    --status-warning: #ffc107;
+    --status-critical: #ff3b30;
+    --status-info: #00e5ff;
+    --status-standby: #c084fc;
+
+    /* shadcn fallback (kept dark) */
+    --background: 240 6% 4%;
+    --foreground: 0 0% 96%;
+    --card: 240 6% 6%;
+    --card-foreground: 0 0% 96%;
+    --popover: 240 6% 6%;
+    --popover-foreground: 0 0% 96%;
+    --primary: 187 100% 50%;
+    --primary-foreground: 0 0% 0%;
+    --secondary: 240 6% 12%;
+    --secondary-foreground: 0 0% 96%;
+    --muted: 240 6% 12%;
+    --muted-foreground: 240 5% 65%;
+    --accent: 240 6% 14%;
+    --accent-foreground: 0 0% 96%;
+    --destructive: 5 100% 60%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 240 5% 16%;
+    --input: 240 5% 16%;
+    --ring: 187 100% 50%;
+    --radius: 0;
+}
+
+* {
+    border-color: var(--border-grid);
+}
+
+html,
+body,
+#root {
+    height: 100%;
+    background: var(--bg-void);
+    color: var(--txt-primary);
+    font-family: "Figtree", system-ui, sans-serif;
+    font-size: 13px;
+    line-height: 1.45;
     -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
 }
 
-code {
-    font-family:
-        source-code-pro, Menlo, Monaco, Consolas, "Courier New", monospace;
+body {
+    overflow: hidden;
 }
 
-@layer base {
-    :root {
-        --background: 0 0% 100%;
-        --foreground: 0 0% 3.9%;
-        --card: 0 0% 100%;
-        --card-foreground: 0 0% 3.9%;
-        --popover: 0 0% 100%;
-        --popover-foreground: 0 0% 3.9%;
-        --primary: 0 0% 9%;
-        --primary-foreground: 0 0% 98%;
-        --secondary: 0 0% 96.1%;
-        --secondary-foreground: 0 0% 9%;
-        --muted: 0 0% 96.1%;
-        --muted-foreground: 0 0% 45.1%;
-        --accent: 0 0% 96.1%;
-        --accent-foreground: 0 0% 9%;
-        --destructive: 0 84.2% 60.2%;
-        --destructive-foreground: 0 0% 98%;
-        --border: 0 0% 89.8%;
-        --input: 0 0% 89.8%;
-        --ring: 0 0% 3.9%;
-        --chart-1: 12 76% 61%;
-        --chart-2: 173 58% 39%;
-        --chart-3: 197 37% 24%;
-        --chart-4: 43 74% 66%;
-        --chart-5: 27 87% 67%;
-        --radius: 0.5rem;
-    }
-    .dark {
-        --background: 0 0% 3.9%;
-        --foreground: 0 0% 98%;
-        --card: 0 0% 3.9%;
-        --card-foreground: 0 0% 98%;
-        --popover: 0 0% 3.9%;
-        --popover-foreground: 0 0% 98%;
-        --primary: 0 0% 98%;
-        --primary-foreground: 0 0% 9%;
-        --secondary: 0 0% 14.9%;
-        --secondary-foreground: 0 0% 98%;
-        --muted: 0 0% 14.9%;
-        --muted-foreground: 0 0% 63.9%;
-        --accent: 0 0% 14.9%;
-        --accent-foreground: 0 0% 98%;
-        --destructive: 0 62.8% 30.6%;
-        --destructive-foreground: 0 0% 98%;
-        --border: 0 0% 14.9%;
-        --input: 0 0% 14.9%;
-        --ring: 0 0% 83.1%;
-        --chart-1: 220 70% 50%;
-        --chart-2: 160 60% 45%;
-        --chart-3: 30 80% 55%;
-        --chart-4: 280 65% 60%;
-        --chart-5: 340 75% 55%;
-    }
+.font-azeret {
+    font-family: "Azeret Mono", monospace;
+    letter-spacing: -0.01em;
+}
+.font-mono-jb {
+    font-family: "JetBrains Mono", monospace;
 }
 
-@layer base {
-    * {
-        @apply border-border;
-    }
-    body {
-        @apply bg-background text-foreground;
-    }
+.kpi-num {
+    font-family: "Azeret Mono", monospace;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 0.95;
 }
 
-@layer base {
-    [data-debug-wrapper="true"] {
-        display: contents !important;
-    }
+.uppercase-wide {
+    font-family: "JetBrains Mono", monospace;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    font-size: 10px;
+    color: var(--txt-secondary);
+}
 
-    [data-debug-wrapper="true"] > * {
-        margin-left: inherit;
-        margin-right: inherit;
-        margin-top: inherit;
-        margin-bottom: inherit;
-        padding-left: inherit;
-        padding-right: inherit;
-        padding-top: inherit;
-        padding-bottom: inherit;
-        column-gap: inherit;
-        row-gap: inherit;
-        gap: inherit;
-        border-left-width: inherit;
-        border-right-width: inherit;
-        border-top-width: inherit;
-        border-bottom-width: inherit;
-        border-left-style: inherit;
-        border-right-style: inherit;
-        border-top-style: inherit;
-        border-bottom-style: inherit;
-        border-left-color: inherit;
-        border-right-color: inherit;
-        border-top-color: inherit;
-        border-bottom-color: inherit;
+.label-key {
+    font-family: "JetBrains Mono", monospace;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    font-size: 10px;
+    color: var(--txt-muted);
+}
+
+.panel {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-panel);
+}
+
+.panel-flush {
+    background: var(--bg-panel);
+    border-right: 1px solid var(--border-panel);
+}
+
+.btn {
+    font-family: "JetBrains Mono", monospace;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    font-size: 11px;
+    padding: 8px 14px;
+    border: 1px solid var(--border-strong);
+    background: transparent;
+    color: var(--txt-primary);
+    transition:
+        background 80ms,
+        color 80ms,
+        border-color 80ms;
+    cursor: pointer;
+}
+.btn:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+.btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+.btn-primary {
+    border-color: var(--status-info);
+    color: var(--status-info);
+}
+.btn-primary:hover {
+    background: var(--status-info);
+    color: #000;
+}
+.btn-danger {
+    border-color: var(--status-critical);
+    color: var(--status-critical);
+}
+.btn-danger:hover {
+    background: var(--status-critical);
+    color: #000;
+}
+.btn-warn {
+    border-color: var(--status-warning);
+    color: var(--status-warning);
+}
+.btn-warn:hover {
+    background: var(--status-warning);
+    color: #000;
+}
+.btn-ok {
+    border-color: var(--status-nominal);
+    color: var(--status-nominal);
+}
+.btn-ok:hover {
+    background: var(--status-nominal);
+    color: #000;
+}
+
+.badge {
+    font-family: "JetBrains Mono", monospace;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-size: 10px;
+    padding: 2px 6px;
+    border: 1px solid currentColor;
+    display: inline-block;
+    line-height: 1.3;
+}
+
+.scroll-area {
+    overflow: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-strong) transparent;
+}
+.scroll-area::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+.scroll-area::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.12);
+}
+.scroll-area::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+/* Zebra row */
+.zebra > *:nth-child(odd) {
+    background: rgba(255, 255, 255, 0.015);
+}
+
+/* Status color helpers */
+.t-nominal {
+    color: var(--status-nominal);
+}
+.t-warn {
+    color: var(--status-warning);
+}
+.t-crit {
+    color: var(--status-critical);
+}
+.t-info {
+    color: var(--status-info);
+}
+.t-stby {
+    color: var(--status-standby);
+}
+.t-muted {
+    color: var(--txt-muted);
+}
+.t-sec {
+    color: var(--txt-secondary);
+}
+
+/* Boot screen */
+@keyframes blink {
+    0%,
+    49% {
+        opacity: 1;
     }
+    50%,
+    100% {
+        opacity: 0;
+    }
+}
+.cursor-blink::after {
+    content: "_";
+    margin-left: 4px;
+    animation: blink 1s steps(1) infinite;
+    color: var(--status-info);
+}
+
+/* Telex line shimmer for advisor */
+@keyframes scanline {
+    from {
+        background-position: 0 0;
+    }
+    to {
+        background-position: 0 4px;
+    }
+}
+.telex {
+    background-image: repeating-linear-gradient(
+        to bottom,
+        rgba(255, 255, 255, 0) 0,
+        rgba(255, 255, 255, 0) 3px,
+        rgba(255, 255, 255, 0.02) 4px
+    );
+}
+
+/* Duty block colours */
+.duty-flight {
+    background: rgba(0, 229, 255, 0.18);
+    border-left: 2px solid var(--status-info);
+}
+.duty-rest {
+    background: rgba(255, 255, 255, 0.04);
+}
+.duty-standby {
+    background: rgba(255, 193, 7, 0.18);
+    border-left: 2px solid var(--status-warning);
+}
+.duty-off {
+    background: rgba(0, 230, 118, 0.12);
+}
+.duty-sick {
+    background: rgba(255, 59, 48, 0.22);
+    border-left: 2px solid var(--status-critical);
+}
+
+.grid-strip {
+    background-image:
+        linear-gradient(
+            to right,
+            var(--border-grid) 1px,
+            transparent 1px
+        ),
+        linear-gradient(to bottom, var(--border-grid) 1px, transparent 1px);
+    background-size: 60px 24px;
+}
+
+input,
+select,
+textarea {
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px solid var(--border-strong);
+    color: var(--txt-primary);
+    padding: 6px 10px;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 12px;
+    outline: none;
+}
+input:focus,
+select:focus,
+textarea:focus {
+    border-color: var(--status-info);
 }

@@ -1,72 +1,205 @@
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI, APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List
+from pydantic import BaseModel, Field
+from typing import Optional
 import uuid
 from datetime import datetime, timezone
 
+import simulation as sim
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
+# MongoDB
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# Create the main app without a prefix
-app = FastAPI()
-
-# Create a router with the /api prefix
+app = FastAPI(title="OCC Sim API")
 api_router = APIRouter(prefix="/api")
 
+# Configure logging
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("occ.api")
 
-# Define Models
-class StatusCheck(BaseModel):
-    model_config = ConfigDict(extra="ignore")  # Ignore MongoDB's _id field
-    
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-class StatusCheckCreate(BaseModel):
-    client_name: str
+# ---------------- Request models ---------------- #
+class AssignReq(BaseModel):
+    crew_id: str
+    force: bool = False
 
-# Add your routes to the router instead of directly to app
+
+class TickReq(BaseModel):
+    minutes: int = 30
+
+
+class ResolveReq(BaseModel):
+    action: str
+
+
+class AdvisorReq(BaseModel):
+    incident_id: Optional[str] = None
+    question: Optional[str] = None
+
+
+# ---------------- DB helpers ---------------- #
+async def _load(game_id: str) -> dict:
+    doc = await db.games.find_one({"id": game_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Game not found")
+    return doc
+
+
+async def _save(state: dict) -> None:
+    await db.games.replace_one({"id": state["id"]}, state, upsert=True)
+
+
+# ---------------- Routes ---------------- #
 @api_router.get("/")
 async def root():
-    return {"message": "Hello World"}
+    return {"service": "OCC Sim", "ok": True, "time": datetime.now(timezone.utc).isoformat()}
 
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.model_dump()
-    status_obj = StatusCheck(**status_dict)
-    
-    # Convert to dict and serialize datetime to ISO string for MongoDB
-    doc = status_obj.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
-    
-    _ = await db.status_checks.insert_one(doc)
-    return status_obj
 
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    # Exclude MongoDB's _id field from the query results
-    status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
-    
-    # Convert ISO string timestamps back to datetime objects
-    for check in status_checks:
-        if isinstance(check['timestamp'], str):
-            check['timestamp'] = datetime.fromisoformat(check['timestamp'])
-    
-    return status_checks
+@api_router.post("/sim/new")
+async def create_new_game():
+    state = sim.new_game()
+    await _save(state)
+    return state
 
-# Include the router in the main app
+
+@api_router.get("/sim/{game_id}")
+async def get_state(game_id: str):
+    return await _load(game_id)
+
+
+@api_router.get("/sim/{game_id}/roster_status")
+async def roster_status(game_id: str):
+    state = await _load(game_id)
+    return sim.roster_completeness(state)
+
+
+@api_router.post("/sim/{game_id}/check_assignment/{flight_id}")
+async def precheck(game_id: str, flight_id: str, body: AssignReq):
+    state = await _load(game_id)
+    warnings = sim.check_assignment(state, flight_id, body.crew_id)
+    return {"warnings": warnings, "has_critical": any(w["severity"] == "critical" for w in warnings)}
+
+
+@api_router.post("/sim/{game_id}/assign/{flight_id}")
+async def assign(game_id: str, flight_id: str, body: AssignReq):
+    state = await _load(game_id)
+    result = sim.assign_crew(state, flight_id, body.crew_id, force=body.force)
+    if result["applied"]:
+        await _save(state)
+    return result
+
+
+@api_router.post("/sim/{game_id}/unassign/{flight_id}/{crew_id}")
+async def unassign(game_id: str, flight_id: str, crew_id: str):
+    state = await _load(game_id)
+    result = sim.unassign_crew(state, flight_id, crew_id)
+    await _save(state)
+    return result
+
+
+@api_router.post("/sim/{game_id}/start_day")
+async def start_day(game_id: str):
+    state = await _load(game_id)
+    result = sim.start_day(state)
+    await _save(state)
+    return {**result, "state": state}
+
+
+@api_router.post("/sim/{game_id}/tick")
+async def tick(game_id: str, body: TickReq):
+    state = await _load(game_id)
+    result = sim.tick(state, minutes=body.minutes)
+    await _save(state)
+    return {**result, "kpis": state["kpis"], "clock": state["clock"], "incidents": state["incidents"]}
+
+
+@api_router.post("/sim/{game_id}/resolve/{incident_id}")
+async def resolve(game_id: str, incident_id: str, body: ResolveReq):
+    state = await _load(game_id)
+    result = sim.resolve_incident(state, incident_id, body.action)
+    await _save(state)
+    return result
+
+
+@api_router.post("/sim/{game_id}/end_day")
+async def end_day(game_id: str):
+    state = await _load(game_id)
+    result = sim.end_day(state)
+    await _save(state)
+    return result
+
+
+@api_router.post("/sim/{game_id}/advisor")
+async def advisor(game_id: str, body: AdvisorReq):
+    state = await _load(game_id)
+    summary = sim.summarize_state_for_advisor(state, focus_incident_id=body.incident_id)
+    question = body.question or (
+        "Given the operational state below, give a tactical recommendation in 3-6 short sentences. "
+        "Be specific: name flights, suggest concrete recovery actions (callout standby, swap, delay, reroute, cancel), "
+        "and call out the biggest legality / fatigue risk. Use airline operations control language."
+    )
+
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        api_key = os.environ.get("EMERGENT_LLM_KEY")
+        if not api_key:
+            raise RuntimeError("EMERGENT_LLM_KEY missing")
+        chat = LlmChat(
+            api_key=api_key,
+            session_id=f"advisor-{game_id}",
+            system_message=(
+                "You are 'OPS-ADVISOR', a senior airline operations control supervisor at Eaglewing International "
+                "(simulation). You speak in concise, professional airline ops-control language. "
+                "You reference EASA FTL concepts (FDP, rest, type rating) when relevant but always remind that this "
+                "is a SIMULATION, not an official compliance tool. Keep answers under 120 words. "
+                "Output plain text only (no markdown headings)."
+            ),
+        ).with_model("anthropic", "claude-sonnet-4-5-20250929")
+        import json
+        msg = UserMessage(text=f"OPERATIONAL STATE:\n{json.dumps(summary, indent=2)}\n\nREQUEST: {question}")
+        text = await chat.send_message(msg)
+        # Persist short advisor history
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "incident_id": body.incident_id,
+            "question": question,
+            "response": text,
+        }
+        state.setdefault("advisor_history", []).append(entry)
+        # Keep last 20
+        state["advisor_history"] = state["advisor_history"][-20:]
+        await _save(state)
+        return {"ok": True, "response": text, "summary": summary}
+    except Exception as exc:
+        logger.exception("Advisor failure")
+        # Graceful fallback so UI never breaks
+        return JSONResponse(
+            status_code=200,
+            content={
+                "ok": False,
+                "error": str(exc),
+                "response": (
+                    ">> SYS_MSG: Advisor offline. Recommend: triage open incidents by severity, "
+                    "call out standby for crew gaps, accept short delays before cancellations, "
+                    "and verify FDP/rest before any swap."
+                ),
+                "summary": summary,
+            },
+        )
+
+
 app.include_router(api_router)
 
 app.add_middleware(
@@ -77,12 +210,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
