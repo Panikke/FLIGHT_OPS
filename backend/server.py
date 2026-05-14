@@ -146,6 +146,14 @@ async def end_day(game_id: str):
     return result
 
 
+@api_router.post("/sim/{game_id}/restart_day")
+async def restart_day(game_id: str):
+    state = await _load(game_id)
+    result = sim.restart_day(state)
+    await _save(state)
+    return {**result, "state": state}
+
+
 @api_router.post("/sim/{game_id}/next_day")
 async def next_day(game_id: str):
     state = await _load(game_id)

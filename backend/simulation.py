@@ -1040,6 +1040,49 @@ def start_day(state: dict) -> dict:
     return {"ok": True}
 
 
+def restart_day(state: dict) -> dict:
+    """Reset the current day to its start: clock back to 04:00Z, incidents
+    cleared, decisions wiped, flight delays/status reset, KPIs reset to fresh.
+    The roster (crew assignments to flights) is preserved.
+    """
+    state["clock"] = state["day_start"]
+    state["incidents"] = []
+    state["decisions_log"] = []
+    state["tick_count"] = 0
+    state["phase"] = "OPS"
+    state["kpis"] = {
+        "otp_pct": 100.0,
+        "legality_breaches": 0,
+        "fatigue_index": int(sum(c["fatigue_score"] for c in state["crew"]) / max(1, len(state["crew"]))),
+        "cost_usd": 0,
+        "pax_delay_min": 0,
+        "pax_disrupted": 0,
+        "score": 1000,
+    }
+    # Reset flight runtime fields, keep crew assignments
+    for f in state["flights"]:
+        f["status"] = "scheduled"
+        f["delay_min"] = 0
+        # Don't clobber the night-stop return note
+        if not (f.get("note") or "").startswith("RETURN FROM NIGHT-STOP"):
+            f["note"] = ""
+    # Restore any sick crew that became sick during this day's ops back to on-duty
+    # Cleanest approach: if a crew was assigned to any flight, they're on_duty again
+    assigned_ids = {cid for f in state["flights"] for cid in f["assigned_crew_ids"]}
+    for c in state["crew"]:
+        if c["id"] in assigned_ids:
+            c["status"] = "on_duty"
+            # Make sure assigned_flight_id is set to one of the assigned flights
+            c["assigned_flight_id"] = next(
+                (f["id"] for f in state["flights"] if c["id"] in f["assigned_crew_ids"]),
+                None,
+            )
+        elif c["status"] == "sick":
+            # Crew that called in sick AT DAY START stay sick; this is a coarse approximation
+            pass
+    return {"ok": True, "clock": state["clock"]}
+
+
 def end_day(state: dict) -> dict:
     state["phase"] = "DEBRIEF"
     _recompute_kpis(state)

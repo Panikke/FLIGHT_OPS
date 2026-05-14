@@ -123,6 +123,17 @@ function App() {
         setView("debrief");
     }
 
+    async function restartDay() {
+        if (!state?.id) return;
+        // Optional confirmation
+        if (!window.confirm("RESTART DAY — clock back to 04:00Z, incidents and decisions cleared. Roster kept. Continue?")) return;
+        setPlaying(false);
+        await api.restartDay(state.id);
+        await refresh();
+        setView("incidents");
+        setToast("▶ DAY RESTARTED · clock back to 04:00Z");
+    }
+
     async function startDay() {
         await api.startDay(state.id);
         await refresh();
@@ -191,6 +202,7 @@ function App() {
                 onTick={tick}
                 onEndDay={endDay}
                 onResetGame={newGame}
+                onRestartDay={restartDay}
                 ticking={ticking}
                 playing={playing}
                 speed={speed}

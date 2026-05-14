@@ -30,6 +30,7 @@ export default function HeaderBar({
     onTick,
     onEndDay,
     onResetGame,
+    onRestartDay,
     ticking,
     playing,
     speed,
@@ -68,11 +69,29 @@ export default function HeaderBar({
                 {state.phase === "OPS" && (
                     <>
                         <button
+                            data-testid="speed-down-btn"
+                            className="btn"
+                            onClick={() => onChangeSpeed(Math.max(1, speed - 1))}
+                            disabled={speed <= 1}
+                            title="Slower"
+                        >
+                            ◀◀
+                        </button>
+                        <button
                             data-testid="play-pause-btn"
                             className={`btn ${playing ? "btn-warn" : "btn-ok"}`}
                             onClick={onTogglePlay}
                         >
                             {playing ? "⏸ PAUSE" : "▶ PLAY"}
+                        </button>
+                        <button
+                            data-testid="speed-up-btn"
+                            className="btn"
+                            onClick={() => onChangeSpeed(Math.min(4, speed + 1))}
+                            disabled={speed >= 4}
+                            title="Faster"
+                        >
+                            ▶▶
                         </button>
                         <div className="flex border border-white/20">
                             {[
@@ -118,6 +137,14 @@ export default function HeaderBar({
                             disabled={ticking}
                         >
                             +60M
+                        </button>
+                        <button
+                            data-testid="restart-day-btn"
+                            className="btn btn-warn"
+                            onClick={onRestartDay}
+                            title="Restart current day, keep roster"
+                        >
+                            ↺ RESTART DAY
                         </button>
                         <button
                             data-testid="end-day-btn"
