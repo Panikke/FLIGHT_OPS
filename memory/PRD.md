@@ -40,7 +40,10 @@ OVERRIDE: critical breaches can be forced; each force increments `kpis.legality_
 - 2026-05-13: React frontend with control-room aesthetic — Boot screen, header KPI strip, sidebar, Roster Board, Flight Timeline Gantt, Incident Queue, Crew Pool, Advisor Panel (telex), FTL Regs cheat sheet, End-of-Day Debrief
 - 2026-05-13: Assign Modal with crew search, rank filter, live legality pre-check, ASSIGN + OVERRIDE buttons
 - 2026-05-13: localStorage session persistence
-- 2026-05-13: **Time speed control** — PLAY/PAUSE + 4 speed levels (1×/2×/5×/15×). Auto-pauses on new incident or any open incident. Manual +15M/+30M/+60M still available.
+- 2026-05-13: **Time speed control** — PLAY/PAUSE + 4 speed levels (1×/2×/5×/15×). Auto-pauses on new incident or any open incident.
+- 2026-05-14: **Realism — crew pairings**. Short-haul out-and-back operated by the same crew set (single `pairing_id`, single FDP, assign/unassign propagates across siblings). Long-haul is single-sector per day with crew night-stop. AssignModal shows pairing notice. RosterBoard PAIRING column shows sector sequence.
+- 2026-05-14: Bug fixes — IncidentQueue default filter ALL (resolved cards stay visible), Advisor send button no longer occluded by Emergent badge, tick() auto-pauses on backend error.
+- 2026-05-14: Backend pytest 13/13 (10 legacy + 3 new pairing tests). Frontend full E2E walked through: boot → roster → assign with pairing notice → start-day → play (clock advanced) → tick → resolve incident → advisor with real Claude response → end-day → debrief.
 
 ## Backend endpoints
 - `GET /api/` – health
