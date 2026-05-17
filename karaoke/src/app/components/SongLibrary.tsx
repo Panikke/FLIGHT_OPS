@@ -49,36 +49,43 @@ export function SongLibrary({ songs, onSelectSong, onDeleteSong }: SongLibraryPr
               return (
                 <div
                   key={song.id}
-                  className="bg-black/30 backdrop-blur-sm border border-white/10 rounded-xl overflow-hidden hover:border-purple-500/60 transition-all group"
+                  className="bg-black/30 backdrop-blur-sm border border-white/10 rounded-xl hover:border-purple-500/60 transition-all group cursor-pointer"
+                  onClick={() => onSelectSong(song)}
                 >
-                  {/* Cover art */}
-                  <div className="relative h-36 bg-gradient-to-br from-purple-900/40 to-blue-900/40 flex items-center justify-center overflow-hidden">
+                  {/* Cover art with play overlay */}
+                  <div className="relative h-40 bg-gradient-to-br from-purple-900/40 to-blue-900/40 flex items-center justify-center rounded-t-xl overflow-hidden">
                     {song.coverArtUrl ? (
                       <img src={song.coverArtUrl} alt={song.title} className="w-full h-full object-cover" />
                     ) : (
                       <span className="text-5xl opacity-30">🎵</span>
                     )}
+
+                    {/* Play overlay on hover */}
+                    <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                      <div className="w-14 h-14 bg-white/20 backdrop-blur-sm rounded-full flex items-center justify-center border-2 border-white/60">
+                        <Play className="w-6 h-6 text-white ml-0.5" />
+                      </div>
+                    </div>
+
+                    {/* Lyrics badge */}
+                    <span className={`absolute bottom-2 left-2 text-xs px-2 py-0.5 rounded-full font-medium ${badge.cls}`}>
+                      {badge.label}
+                    </span>
+
+                    {/* Delete button — stops propagation so it doesn't trigger play */}
                     <button
-                      onClick={() => onDeleteSong(song.id)}
+                      onClick={e => { e.stopPropagation(); onDeleteSong(song.id); }}
                       className="absolute top-2 right-2 p-1.5 bg-black/60 hover:bg-red-500/80 rounded-lg opacity-0 group-hover:opacity-100 transition-all"
                     >
                       <Trash2 className="w-3.5 h-3.5 text-white" />
                     </button>
-                    <span className={`absolute bottom-2 left-2 text-xs px-2 py-0.5 rounded-full font-medium ${badge.cls}`}>
-                      {badge.label}
-                    </span>
                   </div>
 
+                  {/* Song info */}
                   <div className="p-4">
                     <h3 className="font-semibold truncate">{song.title}</h3>
                     <p className="text-sm text-gray-400 truncate mt-0.5">{song.artist}</p>
                     <p className="text-xs text-gray-500 mt-0.5">{song.language}</p>
-                    <button
-                      onClick={() => onSelectSong(song)}
-                      className="mt-3 w-full flex items-center justify-center gap-2 py-2 bg-gradient-to-r from-pink-500 to-purple-500 rounded-lg hover:from-pink-600 hover:to-purple-600 transition-all text-sm font-medium"
-                    >
-                      <Play className="w-4 h-4" /> Play
-                    </button>
                   </div>
                 </div>
               );

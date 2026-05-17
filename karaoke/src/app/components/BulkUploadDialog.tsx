@@ -169,10 +169,10 @@ export function BulkUploadDialog({ onClose, onUpload }: BulkUploadDialogProps) {
   };
 
   const handleSubmit = async () => {
-    const toUpload = items.filter(it => it.lyrics.trim() || it.lyricsImageFile);
-    if (!toUpload.length) return;
+    if (!items.length) return;
     setSaving(true);
-    const payloads: SongUploadPayload[] = toUpload.map(it => ({
+    // Upload all songs — lyrics are optional (can search later in the player)
+    const payloads: SongUploadPayload[] = items.map(it => ({
       title: it.title,
       artist: it.artist,
       language,
@@ -335,10 +335,10 @@ export function BulkUploadDialog({ onClose, onUpload }: BulkUploadDialogProps) {
           </button>
           <button
             onClick={handleSubmit}
-            disabled={saving || readyCount === 0}
+            disabled={saving || items.length === 0}
             className="flex-1 px-6 py-3 bg-gradient-to-r from-pink-500 to-purple-500 hover:from-pink-600 hover:to-purple-600 disabled:from-gray-600 disabled:to-gray-600 disabled:cursor-not-allowed rounded-lg transition-all font-medium flex items-center justify-center gap-2"
           >
-            {saving ? <><Loader2 className="w-4 h-4 animate-spin" /> Saving...</> : `Add ${readyCount} Song${readyCount !== 1 ? 's' : ''} to Library`}
+            {saving ? <><Loader2 className="w-4 h-4 animate-spin" /> Saving...</> : `Add ${items.length} Song${items.length !== 1 ? 's' : ''} to Library`}
           </button>
         </div>
       </div>
