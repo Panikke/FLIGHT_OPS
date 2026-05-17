@@ -142,27 +142,27 @@ export default function App() {
         />
       ) : (
         <div className="size-full flex flex-col">
-          <header className="bg-black/30 backdrop-blur-sm border-b border-white/10 px-8 py-5">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <Music className="w-8 h-8 text-pink-400" />
-                <h1 className="text-3xl font-bold tracking-tight">Karaoke</h1>
-                <span className="text-sm text-gray-400 ml-2">{songs.length} songs</span>
+          <header className="bg-black/30 backdrop-blur-sm border-b border-white/10 px-6 py-4">
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex items-center gap-3 min-w-0">
+                <Music className="w-8 h-8 text-pink-400 flex-shrink-0" />
+                <h1 className="text-2xl font-bold tracking-tight truncate">Karaoke</h1>
+                <span className="text-sm text-gray-400 flex-shrink-0">{songs.length} songs</span>
               </div>
-              <div className="flex gap-3">
+              <div className="flex gap-3 flex-shrink-0">
                 <button
                   onClick={() => setShowBulkImages(true)}
-                  className="px-5 py-2.5 bg-gradient-to-r from-emerald-500 to-teal-500 rounded-lg hover:from-emerald-600 hover:to-teal-600 transition-all flex items-center gap-2 text-sm font-medium"
+                  className="px-5 py-3 min-h-[48px] bg-gradient-to-r from-emerald-500 to-teal-500 rounded-xl hover:from-emerald-600 hover:to-teal-600 transition-all flex items-center gap-2 font-medium"
                 >
-                  <Images className="w-4 h-4" />
-                  Bulk Add Images
+                  <Images className="w-5 h-5" />
+                  <span className="hidden sm:inline">Bulk Add Images</span>
                 </button>
                 <button
                   onClick={() => setShowBulkUpload(true)}
-                  className="px-5 py-2.5 bg-gradient-to-r from-blue-500 to-cyan-500 rounded-lg hover:from-blue-600 hover:to-cyan-600 transition-all flex items-center gap-2 text-sm font-medium"
+                  className="px-5 py-3 min-h-[48px] bg-gradient-to-r from-blue-500 to-cyan-500 rounded-xl hover:from-blue-600 hover:to-cyan-600 transition-all flex items-center gap-2 font-medium"
                 >
-                  <FolderUp className="w-4 h-4" />
-                  Bulk Upload Songs
+                  <FolderUp className="w-5 h-5" />
+                  <span className="hidden sm:inline">Bulk Upload Songs</span>
                 </button>
               </div>
             </div>
