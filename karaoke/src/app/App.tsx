@@ -57,9 +57,10 @@ export default function App() {
     }).finally(() => setLoading(false));
   }, []);
 
-  const addSongs = useCallback(async (payloads: SongUploadPayload[]) => {
+  const addSongs = useCallback(async (payloads: SongUploadPayload[], onProgress?: (done: number, total: number) => void) => {
     const newSongs: Song[] = [];
-    for (const p of payloads) {
+    for (let i = 0; i < payloads.length; i++) {
+      const p = payloads[i];
       const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       const audioUrl = URL.createObjectURL(p.audioFile);
       const lyricsImageUrl = p.lyricsImageFile ? URL.createObjectURL(p.lyricsImageFile) : undefined;
@@ -87,6 +88,8 @@ export default function App() {
         audioUrl,
         lyricsImageUrl,
       });
+
+      onProgress?.(i + 1, payloads.length);
     }
     setSongs(prev => [...prev, ...newSongs]);
   }, []);
@@ -179,7 +182,7 @@ export default function App() {
       {showBulkUpload && (
         <BulkUploadDialog
           onClose={() => setShowBulkUpload(false)}
-          onUpload={addSongs}
+          onUpload={(payloads, onProgress) => addSongs(payloads, onProgress)}
         />
       )}
 

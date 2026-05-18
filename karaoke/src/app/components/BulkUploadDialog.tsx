@@ -7,7 +7,7 @@ import { parseLrc } from '../../utils/lrcParser';
 
 interface BulkUploadDialogProps {
   onClose: () => void;
-  onUpload: (songs: SongUploadPayload[]) => Promise<void>;
+  onUpload: (songs: SongUploadPayload[], onProgress?: (done: number, total: number) => void) => Promise<void>;
 }
 
 type LyricsStatus = 'pending' | 'searching' | 'found' | 'not-found' | 'manual' | 'file';
@@ -57,6 +57,7 @@ export function BulkUploadDialog({ onClose, onUpload }: BulkUploadDialogProps) {
   const [language, setLanguage] = useState('English');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [saveProgress, setSaveProgress] = useState<{ done: number; total: number } | null>(null);
   const audioRef = useRef<HTMLInputElement>(null);
   const lyricsRef = useRef<HTMLInputElement>(null);
 
@@ -171,7 +172,7 @@ export function BulkUploadDialog({ onClose, onUpload }: BulkUploadDialogProps) {
   const handleSubmit = async () => {
     if (!items.length) return;
     setSaving(true);
-    // Upload all songs — lyrics are optional (can search later in the player)
+    setSaveProgress({ done: 0, total: items.length });
     const payloads: SongUploadPayload[] = items.map(it => ({
       title: it.title,
       artist: it.artist,
@@ -182,8 +183,9 @@ export function BulkUploadDialog({ onClose, onUpload }: BulkUploadDialogProps) {
       audioFile: it.file,
       lyricsImageFile: it.lyricsImageFile,
     }));
-    await onUpload(payloads);
+    await onUpload(payloads, (done, total) => setSaveProgress({ done, total }));
     setSaving(false);
+    setSaveProgress(null);
     onClose();
   };
 
@@ -338,7 +340,10 @@ export function BulkUploadDialog({ onClose, onUpload }: BulkUploadDialogProps) {
             disabled={saving || items.length === 0}
             className="flex-1 px-6 py-3 bg-gradient-to-r from-pink-500 to-purple-500 hover:from-pink-600 hover:to-purple-600 disabled:from-gray-600 disabled:to-gray-600 disabled:cursor-not-allowed rounded-lg transition-all font-medium flex items-center justify-center gap-2"
           >
-            {saving ? <><Loader2 className="w-4 h-4 animate-spin" /> Saving...</> : `Add ${items.length} Song${items.length !== 1 ? 's' : ''} to Library`}
+            {saving
+              ? <><Loader2 className="w-4 h-4 animate-spin" /> {saveProgress ? `Saving ${saveProgress.done} of ${saveProgress.total}…` : 'Preparing…'}</>
+              : `Add ${items.length} Song${items.length !== 1 ? 's' : ''} to Library`
+            }
           </button>
         </div>
       </div>
