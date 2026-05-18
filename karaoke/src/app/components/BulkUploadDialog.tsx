@@ -1,7 +1,6 @@
 import { useState, useRef, useCallback } from 'react';
 import { X, FolderUp, CheckCircle, AlertCircle, Loader2, FileText, Music } from 'lucide-react';
 import type { SongUploadPayload } from '../App';
-import * as musicMetadata from 'music-metadata-browser';
 import { searchLyrics } from '../../utils/lyricsApi';
 import { parseLrc } from '../../utils/lrcParser';
 
@@ -32,19 +31,59 @@ function leadingNumber(name: string) {
   return name.match(/^(\d+)/)?.[1] ?? null;
 }
 
-async function readMetadata(file: File) {
+// Minimal ID3v2 tag reader — no external dependencies
+async function readId3Tags(file: File): Promise<{ title?: string; artist?: string }> {
   try {
-    const meta = await musicMetadata.parseBlob(file);
-    return {
-      title: meta.common.title || stripExt(file.name),
-      artist: meta.common.artist || 'Unknown Artist',
-    };
-  } catch {
-    const parts = stripExt(file.name).split(/[-–]/).map(p => p.trim());
-    return parts.length >= 2
-      ? { artist: parts[0], title: parts.slice(1).join(' - ') }
-      : { title: stripExt(file.name), artist: 'Unknown Artist' };
-  }
+    const buf = await file.slice(0, 131072).arrayBuffer(); // read first 128 KB
+    const b = new Uint8Array(buf);
+    if (b[0] !== 0x49 || b[1] !== 0x44 || b[2] !== 0x33) return {}; // no ID3 header
+    const v = b[3]; // major version: 3 = ID3v2.3, 4 = ID3v2.4
+    // Syncsafe tag size
+    const tagSize = ((b[6] & 0x7f) << 21) | ((b[7] & 0x7f) << 14) | ((b[8] & 0x7f) << 7) | (b[9] & 0x7f);
+    const hasExtHeader = !!(b[5] & 0x40);
+    let pos = 10;
+    if (hasExtHeader) {
+      const extSize = v === 4
+        ? ((b[10] & 0x7f) << 21) | ((b[11] & 0x7f) << 14) | ((b[12] & 0x7f) << 7) | (b[13] & 0x7f)
+        : (b[10] << 24) | (b[11] << 16) | (b[12] << 8) | b[13];
+      pos += extSize;
+    }
+    const result: { title?: string; artist?: string } = {};
+    while (pos + 10 < tagSize + 10 && pos + 10 < b.length) {
+      const id = String.fromCharCode(b[pos], b[pos+1], b[pos+2], b[pos+3]);
+      if (id === '\0\0\0\0') break;
+      const fSize = v === 4
+        ? ((b[pos+4] & 0x7f) << 21) | ((b[pos+5] & 0x7f) << 14) | ((b[pos+6] & 0x7f) << 7) | (b[pos+7] & 0x7f)
+        : (b[pos+4] << 24) | (b[pos+5] << 16) | (b[pos+6] << 8) | b[pos+7];
+      if (fSize <= 0 || fSize > 8192) { pos += 10 + Math.max(fSize, 0); continue; }
+      if (id === 'TIT2' || id === 'TPE1') {
+        const enc = b[pos + 10];
+        const raw = b.slice(pos + 11, pos + 10 + fSize);
+        let text = '';
+        if (enc === 1 || enc === 2) {
+          text = new TextDecoder('utf-16le').decode(raw[0] === 0xff ? raw.slice(2) : raw);
+        } else {
+          text = new TextDecoder(enc === 3 ? 'utf-8' : 'latin1').decode(raw);
+        }
+        text = text.replace(/\0/g, '').trim();
+        if (id === 'TIT2') result.title = text;
+        else result.artist = text;
+        if (result.title && result.artist) break;
+      }
+      pos += 10 + fSize;
+    }
+    return result;
+  } catch { return {}; }
+}
+
+async function readMetadata(file: File) {
+  const tags = await readId3Tags(file);
+  if (tags.title) return { title: tags.title, artist: tags.artist || 'Unknown Artist' };
+  // Fall back to filename: "Artist - Title.mp3" or "01_Title.mp3"
+  const parts = stripExt(file.name).split(/[-–]/).map(p => p.trim());
+  return parts.length >= 2
+    ? { artist: parts[0], title: parts.slice(1).join(' - ') }
+    : { title: stripExt(file.name), artist: 'Unknown Artist' };
 }
 
 function stripExt(name: string) {
