@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback } from 'react';
 import { X, FolderUp, CheckCircle, AlertCircle, Loader2, FileText, Music } from 'lucide-react';
 import type { SongUploadPayload } from '../App';
-import * as musicMetadata from 'music-metadata-browser';
+import { parseBlob } from 'music-metadata';
 import { searchLyrics } from '../../utils/lyricsApi';
 import { parseLrc } from '../../utils/lrcParser';
 
@@ -34,7 +34,7 @@ function leadingNumber(name: string) {
 
 async function readMetadata(file: File) {
   try {
-    const meta = await musicMetadata.parseBlob(file);
+    const meta = await parseBlob(file);
     return {
       title: meta.common.title || stripExt(file.name),
       artist: meta.common.artist || 'Unknown Artist',
