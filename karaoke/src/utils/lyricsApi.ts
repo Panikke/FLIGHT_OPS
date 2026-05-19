@@ -147,20 +147,63 @@ async function searchLyricsOvh(title: string, artist: string): Promise<LyricsRes
   return null;
 }
 
+// ── Source 3: lrclib artist-catalog scan ──────────────────────────────────
+// Fetches all songs by the artist on lrclib and picks the closest title match.
+// Helps when the stored title has minor differences from the lrclib entry.
+async function searchLrclibByScan(title: string, artist: string): Promise<LyricsResult | null> {
+  try {
+    const cleanA = stripTrackNumber(artist);
+    const latinA = hasGreek(cleanA) ? greekToLatin(cleanA) : cleanA;
+    for (const a of [cleanA, latinA]) {
+      const r = await fetch(`https://lrclib.net/api/search?${new URLSearchParams({ artist_name: a })}`);
+      const results: LrclibResult[] = r.ok ? await r.json() : [];
+      if (results.length > 0) {
+        const best = pickBest(results, title, artist);
+        if (best) return best;
+      }
+    }
+    return null;
+  } catch { return null; }
+}
+
+// ── Source 4: keyword search on lrclib ────────────────────────────────────
+// Tries the first 3-4 words of the title as a keyword fallback.
+async function searchLrclibKeywords(title: string, artist: string): Promise<LyricsResult | null> {
+  try {
+    const clean = stripTrackNumber(hasGreek(title) ? greekToLatin(title) : title);
+    const words = clean.split(/\s+/).slice(0, 4).join(' ');
+    if (words.length < 3) return null;
+    const r = await fetch(`https://lrclib.net/api/search?${new URLSearchParams({ q: words })}`);
+    const results: LrclibResult[] = r.ok ? await r.json() : [];
+    return pickBest(results, title, artist);
+  } catch { return null; }
+}
+
 // ── Public API ─────────────────────────────────────────────────────────────
 export async function searchLyrics(title: string, artist: string): Promise<LyricsResult | null> {
-  // Run both sources in parallel
+  // Stage 1: run primary sources in parallel (fast path)
   const [lrclib, ovh] = await Promise.all([
     searchLrclib(title, artist),
     searchLyricsOvh(title, artist),
   ]);
 
-  // Prefer lrclib when it has synced (time-coded) lyrics
+  // Prefer lrclib synced lyrics (time-coded karaoke)
   if (lrclib?.synced.length) return lrclib;
   // lyrics.ovh often has better Greek plain-lyrics coverage
   if (ovh) return ovh;
-  // Fall back to lrclib plain lyrics
+  // lrclib plain lyrics
   if (lrclib) return lrclib;
+
+  // Stage 2: deeper fallbacks (slower — only reached when Stage 1 fails)
+  const [scan, kw] = await Promise.all([
+    searchLrclibByScan(title, artist),
+    searchLrclibKeywords(title, artist),
+  ]);
+
+  if (scan?.synced.length) return scan;
+  if (kw?.synced.length) return kw;
+  if (scan) return scan;
+  if (kw) return kw;
 
   return null;
 }
