@@ -3,9 +3,11 @@ import { SongLibrary } from './components/SongLibrary';
 import { KaraokePlayer } from './components/KaraokePlayer';
 import { BulkUploadDialog } from './components/BulkUploadDialog';
 import { BulkImageDialog } from './components/BulkImageDialog';
+import { EditSongDialog } from './components/EditSongDialog';
 import { Music, FolderUp, Images } from 'lucide-react';
 import type { LyricLine } from '../utils/lrcParser';
-import { dbSave, dbLoadAll, dbDelete, dbUpdate } from '../utils/storage';
+import { dbSave, dbLoadAll, dbDelete, dbDeleteAll, dbUpdate } from '../utils/storage';
+import { searchLyrics } from '../utils/lyricsApi';
 
 export interface Song {
   id: string;
@@ -34,8 +36,10 @@ export interface SongUploadPayload {
 export default function App() {
   const [songs, setSongs] = useState<Song[]>([]);
   const [currentSong, setCurrentSong] = useState<Song | null>(null);
+  const [playlistIds, setPlaylistIds] = useState<Set<string>>(new Set());
   const [showBulkUpload, setShowBulkUpload] = useState(false);
   const [showBulkImages, setShowBulkImages] = useState(false);
+  const [editingSong, setEditingSong] = useState<Song | null>(null);
   const [loading, setLoading] = useState(true);
 
   // Load persisted songs from IndexedDB on mount
@@ -54,44 +58,31 @@ export default function App() {
         coverArtUrl: s.coverArtBlob ? URL.createObjectURL(s.coverArtBlob) : undefined,
       }));
       setSongs(loaded);
+      setPlaylistIds(new Set(loaded.map(s => s.id)));
     }).finally(() => setLoading(false));
   }, []);
 
-  const addSongs = useCallback(async (payloads: SongUploadPayload[], onProgress?: (done: number, total: number) => void) => {
+  const addSongs = useCallback(async (payloads: SongUploadPayload[]) => {
     const newSongs: Song[] = [];
-    for (let i = 0; i < payloads.length; i++) {
-      const p = payloads[i];
+    for (const p of payloads) {
       const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       const audioUrl = URL.createObjectURL(p.audioFile);
       const lyricsImageUrl = p.lyricsImageFile ? URL.createObjectURL(p.lyricsImageFile) : undefined;
-
       await dbSave({
-        id,
-        title: p.title,
-        artist: p.artist,
-        language: p.language,
-        lyrics: p.lyrics,
-        syncedLyrics: p.syncedLyrics,
-        lyricsSource: p.lyricsSource,
-        audioBlob: p.audioFile,
-        lyricsImageBlob: p.lyricsImageFile,
+        id, title: p.title, artist: p.artist, language: p.language,
+        lyrics: p.lyrics, syncedLyrics: p.syncedLyrics, lyricsSource: p.lyricsSource,
+        audioBlob: p.audioFile, lyricsImageBlob: p.lyricsImageFile,
       });
-
-      newSongs.push({
-        id,
-        title: p.title,
-        artist: p.artist,
-        language: p.language,
-        lyrics: p.lyrics,
-        syncedLyrics: p.syncedLyrics,
-        lyricsSource: p.lyricsSource,
-        audioUrl,
-        lyricsImageUrl,
-      });
-
-      onProgress?.(i + 1, payloads.length);
+      newSongs.push({ id, title: p.title, artist: p.artist, language: p.language,
+        lyrics: p.lyrics, syncedLyrics: p.syncedLyrics, lyricsSource: p.lyricsSource,
+        audioUrl, lyricsImageUrl });
     }
     setSongs(prev => [...prev, ...newSongs]);
+    setPlaylistIds(prev => {
+      const next = new Set(prev);
+      newSongs.forEach(s => next.add(s.id));
+      return next;
+    });
   }, []);
 
   const deleteSong = useCallback(async (id: string) => {
@@ -105,8 +96,23 @@ export default function App() {
       }
       return prev.filter(s => s.id !== id);
     });
+    setPlaylistIds(prev => { const n = new Set(prev); n.delete(id); return n; });
     if (currentSong?.id === id) setCurrentSong(null);
   }, [currentSong]);
+
+  const clearLibrary = useCallback(async () => {
+    await dbDeleteAll();
+    setSongs(prev => {
+      prev.forEach(s => {
+        URL.revokeObjectURL(s.audioUrl);
+        if (s.lyricsImageUrl) URL.revokeObjectURL(s.lyricsImageUrl);
+        if (s.coverArtUrl) URL.revokeObjectURL(s.coverArtUrl);
+      });
+      return [];
+    });
+    setPlaylistIds(new Set());
+    setCurrentSong(null);
+  }, []);
 
   const updateCoverArt = useCallback(async (songId: string, imageFile: File) => {
     const coverArtUrl = URL.createObjectURL(imageFile);
@@ -125,10 +131,38 @@ export default function App() {
     setCurrentSong(prev => prev?.id === songId ? { ...prev, lyrics, syncedLyrics, lyricsSource: source } : prev);
   }, []);
 
+  const updateSong = useCallback(async (id: string, patch: { title: string; artist: string; language: string }) => {
+    await dbUpdate(id, patch);
+    setSongs(prev => prev.map(s => s.id === id ? { ...s, ...patch } : s));
+    setCurrentSong(prev => prev?.id === id ? { ...prev, ...patch } : prev);
+  }, []);
+
+  const togglePlaylist = useCallback((id: string) => {
+    setPlaylistIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  // Bulk lyrics search — called from SongLibrary with an array of song IDs
+  const bulkSearchLyrics = useCallback(async (ids: string[]) => {
+    for (const id of ids) {
+      const song = songs.find(s => s.id === id);
+      if (!song) continue;
+      try {
+        const result = await searchLyrics(song.title, song.artist);
+        if (result) await updateLyrics(id, result.plain, result.synced, 'api');
+      } catch { /* continue */ }
+    }
+  }, [songs, updateLyrics]);
+
+  const playlist = songs.filter(s => playlistIds.has(s.id));
+
   if (loading) {
     return (
       <div className="size-full bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 flex items-center justify-center">
-        <div className="text-white text-2xl">Loading library...</div>
+        <div className="text-white text-2xl">Loading library…</div>
       </div>
     );
   }
@@ -138,19 +172,22 @@ export default function App() {
       {currentSong ? (
         <KaraokePlayer
           song={currentSong}
-          playlist={songs}
+          playlist={playlist}
           onSelectSong={setCurrentSong}
           onBack={() => setCurrentSong(null)}
           onUpdateLyrics={updateLyrics}
         />
       ) : (
         <div className="size-full flex flex-col">
-          <header className="bg-black/30 backdrop-blur-sm border-b border-white/10 px-6 py-4">
+          <header className="bg-black/30 backdrop-blur-sm border-b border-white/10 px-6 py-4 flex-shrink-0">
             <div className="flex items-center justify-between gap-4">
               <div className="flex items-center gap-3 min-w-0">
                 <Music className="w-8 h-8 text-pink-400 flex-shrink-0" />
                 <h1 className="text-2xl font-bold tracking-tight truncate">Karaoke</h1>
                 <span className="text-sm text-gray-400 flex-shrink-0">{songs.length} songs</span>
+                {playlistIds.size < songs.length && (
+                  <span className="text-xs text-yellow-400 flex-shrink-0">{playlistIds.size} in playlist</span>
+                )}
               </div>
               <div className="flex gap-3 flex-shrink-0">
                 <button
@@ -173,25 +210,25 @@ export default function App() {
 
           <SongLibrary
             songs={songs}
+            playlistIds={playlistIds}
             onSelectSong={setCurrentSong}
             onDeleteSong={deleteSong}
+            onEditSong={setEditingSong}
+            onTogglePlaylist={togglePlaylist}
+            onSearchLyrics={bulkSearchLyrics}
+            onClearLibrary={clearLibrary}
           />
         </div>
       )}
 
       {showBulkUpload && (
-        <BulkUploadDialog
-          onClose={() => setShowBulkUpload(false)}
-          onUpload={(payloads, onProgress) => addSongs(payloads, onProgress)}
-        />
+        <BulkUploadDialog onClose={() => setShowBulkUpload(false)} onUpload={addSongs} />
       )}
-
       {showBulkImages && (
-        <BulkImageDialog
-          songs={songs}
-          onClose={() => setShowBulkImages(false)}
-          onApply={updateCoverArt}
-        />
+        <BulkImageDialog songs={songs} onClose={() => setShowBulkImages(false)} onApply={updateCoverArt} />
+      )}
+      {editingSong && (
+        <EditSongDialog song={editingSong} onClose={() => setEditingSong(null)} onSave={updateSong} />
       )}
     </div>
   );

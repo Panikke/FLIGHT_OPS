@@ -50,6 +50,11 @@ export async function dbDelete(id: string): Promise<void> {
   await tx(db, 'readwrite', s => s.delete(id));
 }
 
+export async function dbDeleteAll(): Promise<void> {
+  const db = await openDB();
+  await tx(db, 'readwrite', s => s.clear());
+}
+
 export async function dbUpdate(id: string, patch: Partial<Omit<StoredSong, 'id' | 'audioBlob'>>): Promise<void> {
   const db = await openDB();
   return new Promise((resolve, reject) => {
