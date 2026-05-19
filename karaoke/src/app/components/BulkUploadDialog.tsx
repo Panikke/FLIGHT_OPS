@@ -76,14 +76,25 @@ async function readId3Tags(file: File): Promise<{ title?: string; artist?: strin
   } catch { return {}; }
 }
 
+/** Remove leading track numbers: "01_", "1 - ", "02. " etc. */
+function stripTrackNum(s: string): string {
+  return s.replace(/^\d+[\s_\-\.]+/, '').trim();
+}
+
 async function readMetadata(file: File) {
   const tags = await readId3Tags(file);
-  if (tags.title) return { title: tags.title, artist: tags.artist || 'Unknown Artist' };
-  // Fall back to filename: "Artist - Title.mp3" or "01_Title.mp3"
-  const parts = stripExt(file.name).split(/[-–]/).map(p => p.trim());
+  if (tags.title) {
+    return {
+      title: stripTrackNum(tags.title),
+      artist: stripTrackNum(tags.artist || 'Unknown Artist'),
+    };
+  }
+  // Fall back to filename: "01_Artist - Title.mp3" or "Artist - Title.mp3"
+  const base = stripTrackNum(stripExt(file.name));
+  const parts = base.split(/\s[-–]\s/).map(p => p.trim());
   return parts.length >= 2
     ? { artist: parts[0], title: parts.slice(1).join(' - ') }
-    : { title: stripExt(file.name), artist: 'Unknown Artist' };
+    : { title: base, artist: 'Unknown Artist' };
 }
 
 function stripExt(name: string) {
