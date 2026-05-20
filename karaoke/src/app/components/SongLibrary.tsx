@@ -1,6 +1,9 @@
 import { useState } from 'react';
 import { Search, Play, Trash2, Music2, Pencil, ListMusic, ListX, CheckSquare, Square, RefreshCw, Loader2, AlertTriangle } from 'lucide-react';
 import type { Song } from '../App';
+import { MissingLyricsPanel } from './MissingLyricsPanel';
+import { ManualLyricsDialog } from './ManualLyricsDialog';
+import type { LyricLine } from '../../utils/lrcParser';
 
 interface SongLibraryProps {
   songs: Song[];
@@ -11,6 +14,8 @@ interface SongLibraryProps {
   onTogglePlaylist: (id: string) => void;
   onSearchLyrics: (ids: string[]) => Promise<void>;
   onClearLibrary: () => void;
+  onUpdateLyrics: (id: string, lyrics: string, synced: LyricLine[], source: Song['lyricsSource']) => Promise<void>;
+  onAssignLyricsImage: (songId: string, file: File) => Promise<void>;
 }
 
 const lyricsBadge = (song: Song) => {
@@ -22,13 +27,17 @@ const lyricsBadge = (song: Song) => {
 
 export function SongLibrary({
   songs, playlistIds, onSelectSong, onDeleteSong, onEditSong,
-  onTogglePlaylist, onSearchLyrics, onClearLibrary,
+  onTogglePlaylist, onSearchLyrics, onClearLibrary, onUpdateLyrics, onAssignLyricsImage,
 }: SongLibraryProps) {
   const [query, setQuery] = useState('');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [searchingLyrics, setSearchingLyrics] = useState(false);
   const [searchProgress, setSearchProgress] = useState<{ done: number; total: number } | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [manualSong, setManualSong] = useState<Song | null>(null);
+
+  // Songs with no text lyrics at all (synced or plain) — shown in Missing Lyrics panel
+  const missingSongs = songs.filter(s => s.syncedLyrics.length === 0 && !s.lyrics.trim());
 
   const filtered = songs.filter(s => {
     const q = query.toLowerCase();
@@ -82,6 +91,10 @@ export function SongLibrary({
   };
 
   const selectedCount = Array.from(selectedIds).filter(id => filtered.some(s => s.id === id)).length;
+
+  const handleMissingSearch = async (id: string) => {
+    await onSearchLyrics([id]);
+  };
 
   return (
     <div className="flex-1 overflow-hidden flex flex-col p-4 gap-3">
@@ -260,6 +273,23 @@ export function SongLibrary({
           </div>
         )}
       </div>
+
+      {/* Missing Lyrics panel — collapsible, sits below the grid */}
+      <MissingLyricsPanel
+        songs={missingSongs}
+        onSearchOnline={handleMissingSearch}
+        onManualEdit={setManualSong}
+        onAssignImage={onAssignLyricsImage}
+      />
+
+      {/* Manual lyrics dialog */}
+      {manualSong && (
+        <ManualLyricsDialog
+          song={manualSong}
+          onClose={() => setManualSong(null)}
+          onSave={onUpdateLyrics}
+        />
+      )}
     </div>
   );
 }

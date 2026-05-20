@@ -131,6 +131,17 @@ export default function App() {
     setCurrentSong(prev => prev?.id === songId ? { ...prev, lyrics, syncedLyrics, lyricsSource: source } : prev);
   }, []);
 
+  const updateLyricsImage = useCallback(async (songId: string, imageFile: File) => {
+    const lyricsImageUrl = URL.createObjectURL(imageFile);
+    await dbUpdate(songId, { lyricsImageBlob: imageFile });
+    setSongs(prev => prev.map(s => {
+      if (s.id !== songId) return s;
+      if (s.lyricsImageUrl) URL.revokeObjectURL(s.lyricsImageUrl);
+      return { ...s, lyricsImageUrl };
+    }));
+    setCurrentSong(prev => prev?.id === songId ? { ...prev, lyricsImageUrl } : prev);
+  }, []);
+
   const updateSong = useCallback(async (id: string, patch: { title: string; artist: string; language: string }) => {
     await dbUpdate(id, patch);
     setSongs(prev => prev.map(s => s.id === id ? { ...s, ...patch } : s));
@@ -217,6 +228,8 @@ export default function App() {
             onTogglePlaylist={togglePlaylist}
             onSearchLyrics={bulkSearchLyrics}
             onClearLibrary={clearLibrary}
+            onUpdateLyrics={updateLyrics}
+            onAssignLyricsImage={updateLyricsImage}
           />
         </div>
       )}

@@ -25,6 +25,7 @@ export function KaraokePlayer({ song, playlist, onBack, onSelectSong, onUpdateLy
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
   const [searchingLyrics, setSearchingLyrics] = useState(false);
+  const [showImageLyrics, setShowImageLyrics] = useState(false);
   const [queue, setQueue] = useState<Song[]>([]);
 
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -126,6 +127,7 @@ export function KaraokePlayer({ song, playlist, onBack, onSelectSong, onUpdateLy
     setIsPlaying(false);
     setCurrentTime(0);
     lineRefs.current = [];
+    setShowImageLyrics(false);   // always reset to text-first on new song
   }, [song.id]);
 
   // Wake Lock
@@ -332,7 +334,19 @@ export function KaraokePlayer({ song, playlist, onBack, onSelectSong, onUpdateLy
 
         {/* ── Centre panel — lyrics ── */}
         <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-          {song.lyricsImageUrl ? (
+          {/* Text/Image toggle — shown only when both exist */}
+          {hasLyrics && song.lyricsImageUrl && (
+            <div className="flex-shrink-0 flex justify-end px-4 pt-2">
+              <button
+                onClick={() => setShowImageLyrics(v => !v)}
+                className="text-xs px-3 py-1.5 bg-white/10 hover:bg-white/20 rounded-lg transition-colors text-gray-300"
+              >
+                {showImageLyrics ? '📝 Show text lyrics' : '🖼 Show image lyrics'}
+              </button>
+            </div>
+          )}
+          {/* Lyrics image — shown when: no text lyrics, OR user toggled to image */}
+          {(showImageLyrics || !hasLyrics) && song.lyricsImageUrl ? (
             <div className="flex-1 overflow-y-auto flex items-center justify-center p-4">
               <img src={song.lyricsImageUrl} alt="Lyrics" className="max-w-full max-h-full object-contain rounded-xl" />
             </div>
