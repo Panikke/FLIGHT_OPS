@@ -20,7 +20,10 @@
       "Bash(git checkout *)",
       "Bash(npm install *)",
       "Bash(npm audit *)",
-      "Bash(npm uninstall *)"
+      "Bash(npm uninstall *)",
+      "mcp__Claude_Preview__preview_start",
+      "Read(//c/Users/Dan/FLIGHT_OPS/frontend/src/**)",
+      "Read(//c/Users/Dan/FLIGHT_OPS/backend/**)"
     ]
   }
 }
