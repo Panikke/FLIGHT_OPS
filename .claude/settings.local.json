@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__fc3ab183-eb54-48d4-8310-0c11a50caf97__whoami",
+      "mcp__fc3ab183-eb54-48d4-8310-0c11a50caf97__get_screenshot",
+      "mcp__fc3ab183-eb54-48d4-8310-0c11a50caf97__get_design_context",
+      "Bash(Expand-Archive -Path \"C:\\\\Users\\\\Dan\\\\Downloads\\\\Karaoke app with lyrics upload.zip\" -DestinationPath \"C:\\\\Users\\\\Dan\\\\Downloads\\\\karaoke_extracted\" -Force)",
+      "Bash(unzip -o \"/mnt/c/Users/Dan/Downloads/Karaoke app with lyrics upload.zip\" -d \"/mnt/c/Users/Dan/Downloads/karaoke_extracted\")",
+      "Bash(ls \"/mnt/c/Users/Dan/Downloads/\" | grep -i karaoke)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(gh pr create --title 'feat: karaoke app — bulk upload, time-synced lyrics, cover art, Greek support' --body ' *)",
+      "PowerShell(Get-Command gh -ErrorAction SilentlyContinue)",
+      "PowerShell(Get-ChildItem \"C:\\\\Program Files\\\\GitHub CLI\\\\\" -ErrorAction SilentlyContinue; Get-ChildItem \"$env:LOCALAPPDATA\\\\Programs\\\\GitHub CLI\\\\\" -ErrorAction SilentlyContinue; Get-ChildItem \"C:\\\\Users\\\\Dan\\\\AppData\\\\Local\\\\GitHubDesktop\\\\\" -ErrorAction SilentlyContinue | Select-Object -First 5)",
+      "Bash(pnpm exec *)",
+      "Bash(pnpm run *)",
+      "Bash(npm run *)",
+      "Bash(gh pr *)",
+      "Bash(git checkout *)",
+      "Bash(npm install *)",
+      "Bash(npm audit *)",
+      "Bash(npm uninstall *)"
+    ]
+  }
+}
