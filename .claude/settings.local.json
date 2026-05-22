@@ -14,6 +14,29 @@
       "Bash(curl -s -X POST -H 'Authorization: token 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' -H 'Accept: application/vnd.github.v3+json' -H 'Content-Type: application/json' https://api.github.com/repos/Panikke/FLIGHT_OPS/pulls -d '{\"title\":\"feat: auto-roster, flight lifecycle, crew timeline, FDP tracking, richer debrief\",\"head\":\"claude/distracted-bell-ae6835\",\"base\":\"main\",\"body\":\"## Summary\\\\n\\\\n- **Auto-roster** one-click fills all pairing gaps with legality-checked crew\\\\n- **Flight lifecycle** scheduled to boarding to airborne to landed with FDP accumulation\\\\n- **Crew timeline mode** AIRCRAFT/CREW toggle in Flight Timeline with duty bands\\\\n- **FDP progress bar** colour-coded bar in Crew Panel\\\\n- **Flight breakdown table** per-flight table in Debrief\\\\n- **7-day duty check** DUTY_7D critical warning in check_assignment\\\\n- **Model upgrade** OPS-ADVISOR upgraded to claude-sonnet-4-6\\\\n\\\\n Generated with Claude Code\"}')",
       "Bash(ls \"C:\\\\Users\\\\Dan\\\\FLIGHT_OPS\\\\backend\\\\\" 2>/dev/null && echo \"---main repo---\" || echo \"not found\"; ls \"C:\\\\Users\\\\Dan\\\\FLIGHT_OPS\\\\.claude\\\\worktrees\\\\distracted-bell-ae6835\\\\backend\\\\\" 2>/dev/null && echo \"---worktree---\")",
       "PowerShell(& \"C:\\\\Users\\\\Dan\\\\FLIGHT_OPS\\\\backend\\\\.venv\\\\Scripts\\\\pip.exe\" install \"motor>=3.6\" \"pymongo>=4.9\" 2>&1)"
+      "mcp__fc3ab183-eb54-48d4-8310-0c11a50caf97__whoami",
+      "mcp__fc3ab183-eb54-48d4-8310-0c11a50caf97__get_screenshot",
+      "mcp__fc3ab183-eb54-48d4-8310-0c11a50caf97__get_design_context",
+      "Bash(Expand-Archive -Path \"C:\\\\Users\\\\Dan\\\\Downloads\\\\Karaoke app with lyrics upload.zip\" -DestinationPath \"C:\\\\Users\\\\Dan\\\\Downloads\\\\karaoke_extracted\" -Force)",
+      "Bash(unzip -o \"/mnt/c/Users/Dan/Downloads/Karaoke app with lyrics upload.zip\" -d \"/mnt/c/Users/Dan/Downloads/karaoke_extracted\")",
+      "Bash(ls \"/mnt/c/Users/Dan/Downloads/\" | grep -i karaoke)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(gh pr create --title 'feat: karaoke app — bulk upload, time-synced lyrics, cover art, Greek support' --body ' *)",
+      "PowerShell(Get-Command gh -ErrorAction SilentlyContinue)",
+      "PowerShell(Get-ChildItem \"C:\\\\Program Files\\\\GitHub CLI\\\\\" -ErrorAction SilentlyContinue; Get-ChildItem \"$env:LOCALAPPDATA\\\\Programs\\\\GitHub CLI\\\\\" -ErrorAction SilentlyContinue; Get-ChildItem \"C:\\\\Users\\\\Dan\\\\AppData\\\\Local\\\\GitHubDesktop\\\\\" -ErrorAction SilentlyContinue | Select-Object -First 5)",
+      "Bash(pnpm exec *)",
+      "Bash(pnpm run *)",
+      "Bash(npm run *)",
+      "Bash(gh pr *)",
+      "Bash(git checkout *)",
+      "Bash(npm install *)",
+      "Bash(npm audit *)",
+      "Bash(npm uninstall *)",
+      "mcp__Claude_Preview__preview_start",
+      "Read(//c/Users/Dan/FLIGHT_OPS/frontend/src/**)",
+      "Read(//c/Users/Dan/FLIGHT_OPS/backend/**)"
     ]
   }
 }
