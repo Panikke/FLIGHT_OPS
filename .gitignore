@@ -80,7 +80,7 @@ memory/test_credentials.md
 
 # Mobile development
 android-sdk/-e 
-# Environment and credential files
+# Environment and credential files — real secrets stay out
 .env
 .env.*
 *.env
@@ -88,30 +88,7 @@ credentials.json
 *.pem
 *.key
 .credentials
--e 
-# Environment and credential files
-.env
-.env.*
-*.env
-credentials.json
-*.pem
-*.key
-.credentials
--e 
-# Environment and credential files
-.env
-.env.*
-*.env
-credentials.json
-*.pem
-*.key
-.credentials
--e 
-# Environment and credential files
-.env
-.env.*
-*.env
-credentials.json
-*.pem
-*.key
-.credentials
+# Safe to commit: example templates and the non-secret frontend env
+!.env.example
+!**/.env.example
+!frontend/.env
