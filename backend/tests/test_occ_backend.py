@@ -6,8 +6,11 @@ import requests
 
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "").rstrip("/")
 if not BASE_URL:
-    # fallback - read frontend .env
-    with open("/app/frontend/.env") as f:
+    # fallback - read frontend .env (repo-relative; /app for container deploys)
+    _env = os.path.join(os.path.dirname(__file__), "..", "..", "frontend", ".env")
+    if not os.path.exists(_env):
+        _env = "/app/frontend/.env"
+    with open(_env) as f:
         for line in f:
             if line.startswith("REACT_APP_BACKEND_URL="):
                 BASE_URL = line.split("=", 1)[1].strip().strip('"').rstrip("/")

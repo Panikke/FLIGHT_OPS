@@ -185,24 +185,28 @@ async def advisor(game_id: str, body: AdvisorReq):
     )
 
     try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage
-        api_key = os.environ.get("EMERGENT_LLM_KEY")
+        from anthropic import AsyncAnthropic
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
-            raise RuntimeError("EMERGENT_LLM_KEY missing")
-        chat = LlmChat(
-            api_key=api_key,
-            session_id=f"advisor-{game_id}",
-            system_message=(
+            raise RuntimeError("ANTHROPIC_API_KEY missing")
+        anthropic_client = AsyncAnthropic(api_key=api_key)
+        import json
+        response = await anthropic_client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1024,
+            system=(
                 "You are 'OPS-ADVISOR', a senior airline operations control supervisor at Eaglewing International "
                 "(simulation). You speak in concise, professional airline ops-control language. "
                 "You reference EASA FTL concepts (FDP, rest, type rating) when relevant but always remind that this "
                 "is a SIMULATION, not an official compliance tool. Keep answers under 120 words. "
                 "Output plain text only (no markdown headings)."
             ),
-        ).with_model("anthropic", "claude-sonnet-4-6")
-        import json
-        msg = UserMessage(text=f"OPERATIONAL STATE:\n{json.dumps(summary, indent=2)}\n\nREQUEST: {question}")
-        text = await chat.send_message(msg)
+            messages=[{
+                "role": "user",
+                "content": f"OPERATIONAL STATE:\n{json.dumps(summary, indent=2)}\n\nREQUEST: {question}",
+            }],
+        )
+        text = "".join(b.text for b in response.content if b.type == "text")
         # Persist short advisor history
         entry = {
             "ts": datetime.now(timezone.utc).isoformat(),
