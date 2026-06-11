@@ -7,8 +7,8 @@
 
 * **Frontend**: React 19 (CRA + craco) — control-room aesthetic, dark theme
 * **Backend**: FastAPI (Python 3.11+) with MongoDB
-* **AI Ops Advisor**: Claude Sonnet 4.5 via the `emergentintegrations` library
-  using a single `EMERGENT_LLM_KEY` (one key, multi-provider)
+* **AI Ops Advisor**: Claude Sonnet 4.6 via the official `anthropic` SDK
+  using an `ANTHROPIC_API_KEY` from console.anthropic.com
 * **No login** — sessions are kept locally per browser (`localStorage`)
 * **Two scenarios**: open-ended **Free Play** campaign, or fixed-seed
   **Survive 7 Days** challenge with escalating disruption
@@ -143,7 +143,7 @@ There are exactly **two** `.env` files. **Do not commit them to git.**
 MONGO_URL="mongodb://localhost:27017"
 DB_NAME="egw_occ"
 CORS_ORIGINS="https://your-domain.example.com,http://localhost:3000"
-EMERGENT_LLM_KEY="sk-emergent-xxxxxxxxxxxxxxxxxx"
+ANTHROPIC_API_KEY="sk-ant-xxxxxxxxxxxxxxxxxx"
 ```
 
 | Variable           | Required | Notes                                                                    |
@@ -151,7 +151,7 @@ EMERGENT_LLM_KEY="sk-emergent-xxxxxxxxxxxxxxxxxx"
 | `MONGO_URL`        | **yes**  | MongoDB connection string (local: `mongodb://localhost:27017`; Atlas: full SRV URL) |
 | `DB_NAME`          | **yes**  | Database name — backend writes to a single `games` collection            |
 | `CORS_ORIGINS`     | **yes**  | Comma-separated list of allowed frontend origins. Use `*` ONLY for local dev. |
-| `EMERGENT_LLM_KEY` | optional but **strongly recommended** | Without it, the Ops Advisor returns a hard-coded fallback message. See [§ 6](#6-llm-key-ops-advisor). |
+| `ANTHROPIC_API_KEY` | optional but **strongly recommended** | Without it, the Ops Advisor returns a hard-coded fallback message. See [§ 6](#6-llm-key-ops-advisor). |
 
 ### `/opt/egw-occ/frontend/.env`
 
@@ -218,41 +218,37 @@ MONGO_URL="mongodb://occ:<strongpass>@localhost:27017/?authSource=admin"
 
 ## 6. LLM key (Ops Advisor)
 
-The in-game **Ops Advisor** is powered by Anthropic Claude Sonnet 4.5 routed
-through Emergent's `emergentintegrations` library. The library accepts a
-**single universal key** (`EMERGENT_LLM_KEY`) and handles billing.
+The in-game **Ops Advisor** is powered by Anthropic Claude (Sonnet 4.6) via
+the official `anthropic` Python SDK, called directly from the
+`/api/sim/{id}/advisor` route.
 
 ### Get a key
 
-* Sign in at https://app.emergent.sh
-* **Profile → Universal Key → Copy**
-* Optionally enable auto top-up
+* Sign in at https://console.anthropic.com (set up billing if you haven't)
+* **API Keys → Create Key → Copy** (shown once — store it safely)
 
 Paste it into `backend/.env`:
 
 ```dotenv
-EMERGENT_LLM_KEY="sk-emergent-xxxxxxxxxxxxxxxxxx"
+ANTHROPIC_API_KEY="sk-ant-xxxxxxxxxxxxxxxxxx"
 ```
 
-### Use your own LLM provider instead
+### Change the model
 
-If you prefer to pay Anthropic, OpenAI or Google directly, edit
-`/opt/egw-occ/backend/server.py` and change the `LlmChat` initialization
-in the `/api/sim/{id}/advisor` route:
+To use a different Claude model, edit `/opt/egw-occ/backend/server.py` and
+change the `model=` argument in the `/api/sim/{id}/advisor` route:
 
 ```python
-chat = LlmChat(
-    api_key=os.environ["YOUR_OWN_KEY"],
-    session_id=f"advisor-{game_id}",
-    system_message=...,
-).with_model("anthropic", "claude-sonnet-4-5-20250929")   # or
-# .with_model("openai", "gpt-5.2")
-# .with_model("gemini", "gemini-2.5-pro")
+response = await anthropic_client.messages.create(
+    model="claude-sonnet-4-6",   # or "claude-opus-4-8", "claude-haiku-4-5"
+    ...
+)
 ```
 
-Then set the corresponding key in `backend/.env`.
+Sonnet is the default — a good balance of quality, speed and cost for the
+short (sub-120-word) advisor replies.
 
-> If `EMERGENT_LLM_KEY` is missing or invalid, the app **still runs** — the
+> If `ANTHROPIC_API_KEY` is missing or invalid, the app **still runs** — the
 > Advisor falls back to a fixed message (status 200, `ok:false`). Nothing else
 > in the game depends on the LLM.
 
@@ -268,8 +264,6 @@ python3.11 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
-# If pip cannot find emergentintegrations on PyPI, use Emergent's index:
-pip install emergentintegrations --extra-index-url https://d33sy5i8bnduwe.cloudfront.net/simple/
 ```
 
 ### Frontend
@@ -545,9 +539,7 @@ volumes:
 FROM python:3.11-slim
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt \
- && pip install --no-cache-dir emergentintegrations \
-        --extra-index-url https://d33sy5i8bnduwe.cloudfront.net/simple/
+RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8001", "--workers", "2"]
 ```
@@ -652,8 +644,7 @@ mongosh
 | ---------------------------------------------------- | ------------------------------------------------------------------------ |
 | Browser shows the boot screen but `START DUTY` does nothing | `REACT_APP_BACKEND_URL` is wrong or CORS is blocking the call. Open DevTools → Network — look for a failing `POST /api/sim/new`. |
 | Backend logs `KeyError: 'MONGO_URL'`                 | `.env` not loaded — check the file is at `backend/.env`, not committed with `.env.example` name. |
-| `pip install emergentintegrations` fails             | Use the extra index: `pip install emergentintegrations --extra-index-url https://d33sy5i8bnduwe.cloudfront.net/simple/` |
-| Advisor returns "Advisor offline"                    | `EMERGENT_LLM_KEY` missing, expired, or out of credit. Check at <https://app.emergent.sh>. |
+| Advisor returns "Advisor offline"                    | `ANTHROPIC_API_KEY` missing, invalid, or out of credit. Check at <https://console.anthropic.com>. |
 | `502 Bad Gateway` from nginx                         | Backend not running on 127.0.0.1:8001, OR firewall blocks the loopback. Run `curl http://127.0.0.1:8001/api/`. |
 | Frontend build is huge / slow                        | Normal — CRA bundles all routes. Build once on a beefy machine, then `scp` the `build/` directory to small VPS targets. |
 | Static assets 404 after deploy                       | nginx `root` must point at `frontend/build`, AND `try_files $uri $uri/ /index.html;` must be present for SPA routing. |
@@ -682,7 +673,7 @@ backend/
 ├── server.py               # FastAPI routes
 ├── simulation.py           # Domain model + EASA-inspired rule engine
 ├── requirements.txt
-├── .env                    # MONGO_URL, DB_NAME, CORS_ORIGINS, EMERGENT_LLM_KEY
+├── .env                    # MONGO_URL, DB_NAME, CORS_ORIGINS, ANTHROPIC_API_KEY
 └── tests/
     ├── test_occ_backend.py
     ├── test_pairings.py
