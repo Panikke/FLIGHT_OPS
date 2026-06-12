@@ -160,7 +160,8 @@ def test_ops_phase_flow(session, game):
     assert last_clock != game["clock"]
 
     if incident:
-        action = incident["options"][0]["action"]
+        # options carry live feasibility — pick the first feasible one
+        action = next(o["action"] for o in incident["options"] if o.get("feasible", True))
         rr = session.post(f"{API}/sim/{game['id']}/resolve/{incident['id']}",
                           json={"action": action}, timeout=15)
         assert rr.status_code == 200

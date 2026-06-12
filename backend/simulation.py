@@ -990,16 +990,20 @@ def tick(state: dict, minutes: int = 30) -> dict:
             "flight_callsign": flight["callsign"],
             "status": "open",
             "resolution": None,
-            "options": _recovery_options_for(kind),
+            "options": [],
         }
         # Apply immediate impact
         if kind == "CREW_SICK" and flight["assigned_crew_ids"]:
-            # mark one assigned crew as sick
+            # mark one assigned crew as sick — off the whole pairing (one duty)
             cid = random.choice(flight["assigned_crew_ids"])
             c = next(cc for cc in state["crew"] if cc["id"] == cid)
             c["status"] = "sick"
             c["assigned_flight_id"] = None
-            flight["assigned_crew_ids"].remove(cid)
+            pairing_id = flight.get("pairing_id")
+            for pf in state["flights"]:
+                if (pf["id"] == flight["id"] or (pairing_id and pf.get("pairing_id") == pairing_id)) \
+                        and cid in pf["assigned_crew_ids"]:
+                    pf["assigned_crew_ids"].remove(cid)
             inc["affected_crew_id"] = cid
             inc["affected_crew_name"] = c["name"]
         elif kind == "WEATHER":
@@ -1015,6 +1019,9 @@ def tick(state: dict, minutes: int = 30) -> dict:
             flight["delay_min"] += 20 if sev == "minor" else 60
             flight["status"] = "delayed"
 
+        # Options are computed AFTER the impact so they see the real gap
+        inc["options"] = _recovery_options_for(state, flight, kind, sev)
+
         new_incidents.append(inc)
         state["incidents"].append(inc)
 
@@ -1022,37 +1029,145 @@ def tick(state: dict, minutes: int = 30) -> dict:
     return {"ok": True, "new_incidents": new_incidents, "clock": state["clock"]}
 
 
-def _recovery_options_for(kind: str) -> list[dict]:
+def _missing_ranks(state: dict, flight: dict) -> list[str]:
+    """Ranks (in seniority order) where the flight is short of required crew."""
+    req = flight["required_crew"]
+    counts = {"CP": 0, "FO": 0, "SC": 0, "CC": 0}
+    for cid in flight["assigned_crew_ids"]:
+        c = next((cc for cc in state["crew"] if cc["id"] == cid), None)
+        if c:
+            counts[c["rank"]] += 1
+    return [r for r in ("CP", "FO", "SC", "CC") if counts[r] < req[r]]
+
+
+def _legal_candidates(state: dict, flight: dict, rank: str, statuses: tuple[str, ...]) -> list[dict]:
+    """Crew of `rank` in one of `statuses`, type-rated for the flight, passing a
+    full legality check. Sorted by fatigue (freshest first)."""
+    type_q = flight["required_crew"]["type_qual"]
+    out = []
+    for c in state["crew"]:
+        if c["rank"] != rank or c["status"] not in statuses:
+            continue
+        if type_q not in c["qualifications"]:
+            continue
+        if any(w["severity"] == "critical" for w in check_assignment(state, flight["id"], c["id"])):
+            continue
+        out.append(c)
+    out.sort(key=lambda c: c["fatigue_score"])
+    return out
+
+
+def _find_recovery_crew(state: dict, flight: dict, statuses: tuple[str, ...]):
+    """First legal crew member covering the flight's worst rank gap, or None."""
+    for rank in _missing_ranks(state, flight):
+        cands = _legal_candidates(state, flight, rank, statuses)
+        if cands:
+            return cands[0]
+    return None
+
+
+def _find_spare_aircraft(state: dict, flight: dict):
+    """A same-type tail with no remaining active sector today, or None."""
+    active = ("scheduled", "delayed", "boarding", "airborne")
+    for ac in state.get("fleet", FLEET):
+        if ac["type"] != flight["aircraft_type"] or ac["reg"] == flight["aircraft_reg"]:
+            continue
+        busy = any(
+            f["aircraft_reg"] == ac["reg"] and f["status"] in active
+            for f in state["flights"]
+        )
+        if not busy:
+            return ac
+    return None
+
+
+def _cancellable_pairing_sectors(state: dict, flight: dict) -> list[dict]:
+    """This flight plus any not-yet-departed sibling sectors in its pairing —
+    cancelling the outbound cancels the crew's return too."""
+    pairing_id = flight.get("pairing_id")
+    sectors = [flight]
+    for f in state["flights"]:
+        if (pairing_id and f.get("pairing_id") == pairing_id and f["id"] != flight["id"]
+                and f["status"] in ("scheduled", "delayed", "boarding")):
+            sectors.append(f)
+    return sectors
+
+
+def _recovery_options_for(state: dict, flight: dict, kind: str, sev: str) -> list[dict]:
+    """Build the decision menu for an incident from the CURRENT state of the
+    operation: infeasible actions are flagged (with the reason), costs scale
+    with pax count / sector length / severity, and feasible recovery options
+    name the actual resource (crew member, spare tail) they would use."""
+    pax = flight.get("pax_count", 0)
+    block = flight.get("block_min", 0)
+    sev_mult = 1.5 if sev == "major" else 1.0
+
+    def opt(action, label, cost, otp_hit=0, fatigue=0, pax_disrupt=False,
+            feasible=True, reason=None, detail=None):
+        return {
+            "action": action, "label": label, "cost_usd": int(cost),
+            "otp_hit": otp_hit, "fatigue": fatigue, "pax_disrupt": pax_disrupt,
+            "feasible": feasible, "reason": reason, "detail": detail,
+        }
+
+    cancel_sectors = _cancellable_pairing_sectors(state, flight)
+    cancel_pax = sum(f.get("pax_count", 0) for f in cancel_sectors)
     base = [
-        {"action": "delay", "label": "Hold / Accept Delay", "cost_usd": 5000, "otp_hit": 8, "fatigue": 2},
-        {"action": "cancel", "label": "Cancel Flight", "cost_usd": 80000, "otp_hit": 0, "pax_disrupt": True},
+        opt("delay", "Hold / Accept Delay", (1500 + pax * 12) * sev_mult, otp_hit=8, fatigue=2),
+        opt(
+            "cancel",
+            "Cancel Flight" if len(cancel_sectors) == 1 else f"Cancel Pairing ({len(cancel_sectors)} sectors)",
+            15000 * len(cancel_sectors) + cancel_pax * 280,
+            pax_disrupt=True,
+            detail=f"{cancel_pax} pax disrupted, crew released",
+        ),
     ]
+
     if kind == "CREW_SICK":
+        type_q = flight["required_crew"]["type_qual"]
+        gaps = _missing_ranks(state, flight)
+        gap_str = "/".join(gaps) if gaps else "crew"
+        standby = _find_recovery_crew(state, flight, ("standby",))
+        swap = _find_recovery_crew(state, flight, ("available",))
         return [
-            {"action": "callout_standby", "label": "Call Out Standby Crew", "cost_usd": 3000, "otp_hit": 2, "fatigue": 5},
-            {"action": "swap_crew", "label": "Swap From Adjacent Pairing", "cost_usd": 1500, "otp_hit": 4, "fatigue": 3},
-            {"action": "deadhead", "label": "Position Crew (Deadhead)", "cost_usd": 4500, "otp_hit": 12, "fatigue": 8},
+            opt("callout_standby", "Call Out Standby Crew",
+                2500 + (2500 if block > 360 else 0), otp_hit=2, fatigue=5,
+                feasible=standby is not None,
+                reason=None if standby else f"No legal standby {gap_str} rated {type_q}",
+                detail=f"{standby['id']} {standby['name']} ({standby['rank']})" if standby else None),
+            opt("swap_crew", "Reassign Available Crew", 1200, otp_hit=4, fatigue=3,
+                feasible=swap is not None,
+                reason=None if swap else f"No legal available {gap_str} rated {type_q}",
+                detail=f"{swap['id']} {swap['name']} ({swap['rank']})" if swap else None),
+            opt("deadhead", "Position Crew (Deadhead)", 4000 + block * 3, otp_hit=12, fatigue=8),
             *base,
         ]
     if kind == "TECH":
+        spare = _find_spare_aircraft(state, flight)
         return [
-            {"action": "aircraft_swap", "label": "Swap Aircraft From Spare", "cost_usd": 12000, "otp_hit": 18, "fatigue": 1},
-            {"action": "mel_defer", "label": "Accept MEL Deferral", "cost_usd": 800, "otp_hit": 4, "fatigue": 0},
+            opt("aircraft_swap", "Swap Aircraft From Spare", 8000 + pax * 15, otp_hit=18, fatigue=1,
+                feasible=spare is not None,
+                reason=None if spare else f"No spare {flight['aircraft_type']} on the ground",
+                detail=spare["reg"] if spare else None),
+            opt("mel_defer", "Accept MEL Deferral", 800, otp_hit=4,
+                feasible=sev == "minor",
+                reason=None if sev == "minor" else "Defect outside MEL limits — cannot defer"),
             *base,
         ]
     if kind == "WEATHER":
         return [
-            {"action": "reroute", "label": "Reroute / Alternate Airport", "cost_usd": 20000, "otp_hit": 25, "fatigue": 4, "pax_disrupt": True},
+            opt("reroute", "Reroute / Alternate Airport", (6000 + pax * 35) * sev_mult,
+                otp_hit=25, fatigue=4, pax_disrupt=True),
             *base,
         ]
     if kind == "ATC_FLOW":
         return [
-            {"action": "request_slot", "label": "Request Earlier CTOT Slot", "cost_usd": 600, "otp_hit": 6, "fatigue": 0},
+            opt("request_slot", "Request Earlier CTOT Slot", 600, otp_hit=6),
             *base,
         ]
     if kind == "LATE_REPORT":
         return [
-            {"action": "warn_crew", "label": "Issue Verbal Warning", "cost_usd": 0, "otp_hit": 2, "fatigue": 1},
+            opt("warn_crew", "Issue Verbal Warning", 0, otp_hit=2, fatigue=1),
             *base,
         ]
     return base
@@ -1067,8 +1182,37 @@ def resolve_incident(state: dict, incident_id: str, action: str) -> dict:
     chosen = next((o for o in inc["options"] if o["action"] == action), None)
     if not chosen:
         return {"ok": False, "reason": "invalid action"}
-    # Apply
+
     flight = next((f for f in state["flights"] if f["id"] == inc["flight_id"]), None)
+
+    # ---- Validate BEFORE charging: the world may have moved on since the
+    # options were generated, so feasibility is re-checked live. On failure the
+    # incident stays open and nothing is paid.
+    replacement = None
+    spare = None
+    if flight:
+        if action == "callout_standby":
+            replacement = _find_recovery_crew(state, flight, ("standby",))
+            if not replacement:
+                return {"ok": False, "incident": inc,
+                        "reason": chosen.get("reason") or
+                        f"No legal standby crew rated {flight['required_crew']['type_qual']} available."}
+        elif action == "swap_crew":
+            replacement = _find_recovery_crew(state, flight, ("available",))
+            if not replacement:
+                return {"ok": False, "incident": inc,
+                        "reason": chosen.get("reason") or
+                        f"No legal available crew rated {flight['required_crew']['type_qual']}."}
+        elif action == "aircraft_swap":
+            spare = _find_spare_aircraft(state, flight)
+            if not spare:
+                return {"ok": False, "incident": inc,
+                        "reason": f"No spare {flight['aircraft_type']} on the ground."}
+        elif chosen.get("feasible") is False:
+            return {"ok": False, "incident": inc,
+                    "reason": chosen.get("reason") or "Option not feasible."}
+
+    # ---- Apply (success guaranteed from here)
     cost = chosen.get("cost_usd", 0)
     otp_hit = chosen.get("otp_hit", 0)
     fatigue = chosen.get("fatigue", 0)
@@ -1078,41 +1222,44 @@ def resolve_incident(state: dict, incident_id: str, action: str) -> dict:
     state["kpis"]["fatigue_index"] = min(100, state["kpis"]["fatigue_index"] + fatigue)
     if flight:
         if action == "cancel":
-            flight["status"] = "cancelled"
-            state["kpis"]["pax_disrupted"] += flight.get("pax_count", 0)
-            state["kpis"]["pax_delay_min"] += 240 * flight.get("pax_count", 0)
-        elif action == "callout_standby":
-            # find a standby crew that fits the missing role
-            req = flight["required_crew"]
-            type_q = req["type_qual"]
-            current_ranks = {"CP":0,"FO":0,"SC":0,"CC":0}
-            for cid in flight["assigned_crew_ids"]:
-                c = next((cc for cc in state["crew"] if cc["id"]==cid), None)
-                if c:
-                    current_ranks[c["rank"]] += 1
-            missing_rank = None
-            for r in ("CP","FO","SC","CC"):
-                if current_ranks[r] < req[r]:
-                    missing_rank = r
-                    break
-            if missing_rank:
-                candidate = next((c for c in state["crew"] if c["status"]=="standby" and c["rank"]==missing_rank and type_q in c["qualifications"]), None)
-                if candidate:
-                    candidate["status"] = "on_duty"
-                    candidate["assigned_flight_id"] = flight["id"]
-                    flight["assigned_crew_ids"].append(candidate["id"])
-                    inc["replacement_crew_id"] = candidate["id"]
-                    inc["replacement_crew_name"] = candidate["name"]
-                else:
-                    inc["resolution_note"] = "No standby crew of correct rank/qualification available — delay incurred."
-                    flight["delay_min"] += 60
-        elif action == "swap_crew":
-            flight["delay_min"] += 20
+            # Cancelling the outbound kills the rest of the pairing too, and
+            # releases the rostered crew back to the pool.
+            to_cancel = _cancellable_pairing_sectors(state, flight)
+            released: set[str] = set()
+            for cf in to_cancel:
+                cf["status"] = "cancelled"
+                state["kpis"]["pax_disrupted"] += cf.get("pax_count", 0)
+                state["kpis"]["pax_delay_min"] += 240 * cf.get("pax_count", 0)
+                for cid in list(cf["assigned_crew_ids"]):
+                    cf["assigned_crew_ids"].remove(cid)
+                    released.add(cid)
+            for cid in released:
+                c = next((cc for cc in state["crew"] if cc["id"] == cid), None)
+                if c and not any(cid in f["assigned_crew_ids"] for f in state["flights"]):
+                    c["assigned_flight_id"] = None
+                    if c["status"] == "on_duty":
+                        c["status"] = "available"
+            if len(to_cancel) > 1 or released:
+                inc["resolution_note"] = (
+                    f"{len(to_cancel)} sector(s) cancelled; "
+                    f"{len(released)} crew released to the pool."
+                )
+        elif action in ("callout_standby", "swap_crew"):
+            # assign_crew handles the whole pairing + legality bookkeeping
+            assign_crew(state, flight["id"], replacement["id"])
+            replacement["status"] = "on_duty"
+            inc["replacement_crew_id"] = replacement["id"]
+            inc["replacement_crew_name"] = replacement["name"]
+            if action == "swap_crew":
+                flight["delay_min"] += 20
         elif action == "aircraft_swap":
-            # swap to a similar type spare reg if any
-            spare = next((a for a in FLEET if a["type"] == flight["aircraft_type"] and a["reg"] != flight["aircraft_reg"]), None)
-            if spare:
-                flight["aircraft_reg"] = spare["reg"]
+            # the spare tail takes over every remaining sector of the pairing
+            pairing_id = flight.get("pairing_id")
+            for pf in state["flights"]:
+                same_pairing = pf["id"] == flight["id"] or (pairing_id and pf.get("pairing_id") == pairing_id)
+                if same_pairing and pf["status"] in ("scheduled", "delayed", "boarding"):
+                    pf["aircraft_reg"] = spare["reg"]
+            inc["resolution_note"] = f"Aircraft swapped to {spare['reg']}."
             flight["delay_min"] += 45
         elif action == "reroute":
             flight["status"] = "diverted"

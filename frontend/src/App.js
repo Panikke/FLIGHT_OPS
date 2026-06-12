@@ -113,8 +113,11 @@ function App() {
     }, [state, playing]);
 
     async function resolveIncident(iid, action) {
-        await api.resolve(state.id, iid, action);
+        const res = await api.resolve(state.id, iid, action);
         await refresh();
+        if (res && res.ok === false) {
+            setToast(`✕ ${res.reason || "Action not possible — pick another option"}`);
+        }
     }
 
     async function endDay() {
