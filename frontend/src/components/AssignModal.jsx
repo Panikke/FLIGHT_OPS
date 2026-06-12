@@ -76,6 +76,19 @@ export default function AssignModal({ state, flight, onClose, onAssigned }) {
         .map((cid) => state.crew.find((c) => c.id === cid))
         .filter(Boolean);
 
+    // Which other flights is each crew member already rostered on?
+    const rosteredOn = useMemo(() => {
+        const m = new Map();
+        state.flights.forEach((f) => {
+            if (f.id === flight.id) return;
+            f.assigned_crew_ids.forEach((cid) => {
+                if (!m.has(cid)) m.set(cid, []);
+                m.get(cid).push(f.callsign);
+            });
+        });
+        return m;
+    }, [state.flights, flight.id]);
+
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center backdrop-blur-md bg-black/80" data-testid="assign-modal">
             <div className="panel w-[1100px] max-w-[96vw] h-[85vh] flex flex-col" style={{ borderTop: "2px solid var(--status-info)" }}>
@@ -172,7 +185,14 @@ export default function AssignModal({ state, flight, onClose, onAssigned }) {
                                                 <td className={`px-3 py-2 ${c.fatigue_score > 70 ? "t-crit" : c.fatigue_score > 45 ? "t-warn" : "t-nominal"}`}>
                                                     {c.fatigue_score}
                                                 </td>
-                                                <td className={`px-3 py-2 ${statusTone}`}>{c.status.toUpperCase()}</td>
+                                                <td className={`px-3 py-2 ${statusTone}`}>
+                                                    {c.status.toUpperCase()}
+                                                    {rosteredOn.has(c.id) && (
+                                                        <div className="t-warn text-[10px]" data-testid={`rostered-${c.id}`}>
+                                                            ROSTERED · {rosteredOn.get(c.id).join(" ")}
+                                                        </div>
+                                                    )}
+                                                </td>
                                             </tr>
                                         );
                                     })}

@@ -44,7 +44,7 @@ export default function HeaderBar({
     const fatigueTone = k.fatigue_index < 40 ? "good" : k.fatigue_index < 70 ? "warn" : "crit";
 
     return (
-        <div className="border-b border-white/10 bg-[#050505] flex items-stretch">
+        <div className="border-b border-white/10 bg-[#050505] flex items-stretch flex-wrap">
             <div className="px-5 py-2 border-r border-white/10 flex flex-col justify-center min-w-[230px]">
                 <div className="label-key">EGW//OCC · DAY {state.day_number || 1}{state.is_challenge ? ` / ${state.total_days || 7}` : ""}</div>
                 <div className="font-azeret text-lg tracking-tight">
@@ -65,7 +65,7 @@ export default function HeaderBar({
 
             <div className="flex-1" />
 
-            <div className="flex items-center gap-2 px-4 border-l border-white/10">
+            <div className="flex items-center gap-2 px-4 py-2 border-l border-t border-white/10 flex-wrap">
                 {state.phase === "OPS" && (
                     <>
                         <button
