@@ -116,20 +116,40 @@ function IncidentCard({ inc, state, onResolve, onAskAdvisor }) {
                         </>
                     )}
                     {picking &&
-                        inc.options.map((opt) => (
-                            <button
-                                key={opt.action}
-                                data-testid={`inc-act-${inc.id}-${opt.action}`}
-                                className={`btn ${opt.action === "cancel" ? "btn-danger" : opt.action === "delay" ? "btn-warn" : "btn-primary"}`}
-                                onClick={() => {
-                                    setPicking(false);
-                                    onResolve(inc.id, opt.action);
-                                }}
-                                title={`Cost $${opt.cost_usd}, OTP hit ${opt.otp_hit ?? 0}`}
-                            >
-                                {opt.label} <span className="t-muted ml-2">${opt.cost_usd}</span>
-                            </button>
-                        ))}
+                        inc.options.map((opt) => {
+                            const infeasible = opt.feasible === false;
+                            return (
+                                <button
+                                    key={opt.action}
+                                    data-testid={`inc-act-${inc.id}-${opt.action}`}
+                                    className={`btn ${infeasible ? "opacity-40 cursor-not-allowed" : opt.action === "cancel" ? "btn-danger" : opt.action === "delay" ? "btn-warn" : "btn-primary"}`}
+                                    disabled={infeasible}
+                                    onClick={() => {
+                                        setPicking(false);
+                                        onResolve(inc.id, opt.action);
+                                    }}
+                                    title={infeasible ? opt.reason : `Cost $${opt.cost_usd.toLocaleString()}, OTP hit ${opt.otp_hit ?? 0}`}
+                                >
+                                    {opt.label}
+                                    {opt.detail && !infeasible && (
+                                        <span className="t-info ml-2">{opt.detail}</span>
+                                    )}
+                                    <span className="t-muted ml-2">${opt.cost_usd.toLocaleString()}</span>
+                                </button>
+                            );
+                        })}
+                    {picking &&
+                        inc.options
+                            .filter((o) => o.feasible === false)
+                            .map((o) => (
+                                <div
+                                    key={`${o.action}-reason`}
+                                    className="w-full font-mono-jb text-[10px] t-muted"
+                                    data-testid={`inc-infeasible-${inc.id}-${o.action}`}
+                                >
+                                    ✕ {o.label}: {o.reason}
+                                </div>
+                            ))}
                     {picking && (
                         <button className="btn" onClick={() => setPicking(false)} data-testid={`inc-cancel-${inc.id}`}>
                             CANCEL
