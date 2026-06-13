@@ -27,4 +27,7 @@ export const api = {
         client.post(`/sim/${gid}/advisor`, payload).then((r) => r.data),
     autoRoster: (gid) =>
         client.post(`/sim/${gid}/auto_roster`).then((r) => r.data),
+    crewRoster: (gid) => client.get(`/sim/${gid}/crew_roster`).then((r) => r.data),
+    setDayOff: (gid, crewId, day, off = true) =>
+        client.post(`/sim/${gid}/crew/${crewId}/day_off`, { day, off }).then((r) => r.data),
 };

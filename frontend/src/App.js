@@ -8,6 +8,7 @@ import RosterBoard from "./components/views/RosterBoard";
 import FlightTimeline from "./components/views/FlightTimeline";
 import IncidentQueue from "./components/views/IncidentQueue";
 import CrewPanel from "./components/views/CrewPanel";
+import CrewRoster from "./components/views/CrewRoster";
 import AdvisorPanel from "./components/views/AdvisorPanel";
 import RegsHelp from "./components/views/RegsHelp";
 import Debrief from "./components/views/Debrief";
@@ -267,6 +268,7 @@ function App() {
                         />
                     )}
                     {showView === "crew" && <CrewPanel state={state} />}
+                    {showView === "calendar" && <CrewRoster state={state} onChanged={refresh} />}
                     {showView === "advisor" && (
                         <AdvisorPanel
                             state={state}

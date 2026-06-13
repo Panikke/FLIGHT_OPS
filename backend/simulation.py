@@ -76,6 +76,12 @@ MAX_DUTY_7D_HR = 60
 MAX_DUTY_7D_MIN = MAX_DUTY_7D_HR * 60
 MIN_TURNAROUND_MIN = 45          # minimum ground time before the same tail departs again
 DIVERSION_RECOVERY_MIN = 120     # extra positioning time after a diversion before next sector
+# Recurrent days free of duty: crew may not operate beyond this many consecutive
+# duty days without a day off; a warning is raised the day before the limit.
+MAX_CONSECUTIVE_DUTY_DAYS = 6
+DAYS_OFF_WARN_AT = MAX_CONSECUTIVE_DUTY_DAYS - 1
+# Duty codes recorded per crew per day (roster line / calendar cells)
+DUTY_FREE_CODES = ("OFF", "REST", "SICK")   # a day that resets the consecutive-duty count
 
 
 def _fdp_cap_for_flight(flight: dict) -> tuple[int, str]:
@@ -103,6 +109,22 @@ def now_utc_iso() -> str:
 
 
 # ------------------- Crew generation ------------------- #
+
+def _seed_duty_history(days_since_off: int, length: int = 6) -> list[str]:
+    """Synthesise a plausible recent roster line so the calendar is populated on
+    day 1. The trailing run of duty codes equals `days_since_off` (kept consistent
+    with the authoritative counter); a day off sits just before that streak."""
+    duty_pool = ["FLT", "AVL", "FLT", "SBY"]
+    hist: list[str] = []
+    earlier = length - days_since_off
+    for _ in range(max(0, earlier)):
+        hist.append(random.choice(["FLT", "AVL", "OFF", "SBY", "FLT", "AVL"]))
+    if earlier >= 1:
+        hist[-1] = "OFF"   # the day-off that ended the previous streak
+    for _ in range(min(days_since_off, length)):
+        hist.append(random.choice(duty_pool))
+    return hist[-length:]
+
 
 def _generate_crew() -> list[dict]:
     ranks = [
@@ -152,6 +174,13 @@ def _generate_crew() -> list[dict]:
                 "assigned_flight_id": None,
                 "fatigue_score": random.randint(15, 45),  # 0-100 lower better
                 "sickness_risk": round(random.uniform(0.01, 0.08), 3),
+                # ---- Days-off / roster-line tracking ----
+                # consecutive duty days since the crew's last day free of duty
+                "days_since_off": (_dso := random.randint(0, 5)),
+                # per-completed-day duty codes (oldest->newest), grows each day
+                "duty_history": _seed_duty_history(_dso),
+                # absolute future day_numbers the controller has pre-marked OFF
+                "days_off_planned": [],
             })
             cid += 1
     return crew
@@ -415,8 +444,30 @@ def advance_to_next_day(state: dict) -> dict:
                 }
 
     # Update crew
+    incoming_day = state.get("day_number", 1) + 1
     for c in state["crew"]:
         flown = today_block_by_crew.get(c["id"], 0)
+        # Record the duty code for the day just completed (status still reflects
+        # how the day was spent, before we reset it for tomorrow).
+        if flown > 0:
+            day_code = "FLT"
+        elif c["status"] == "off":
+            day_code = "OFF"
+        elif c["status"] == "sick":
+            day_code = "SICK"
+        elif c["status"] == "standby":
+            day_code = "SBY"
+        else:
+            day_code = "AVL"   # available reserve — still a duty day, not a day off
+        c.setdefault("duty_history", []).append(day_code)
+        if len(c["duty_history"]) > 28:
+            c["duty_history"] = c["duty_history"][-28:]
+        # Consecutive-duty counter: a day free of duty resets it, anything else adds
+        if day_code in DUTY_FREE_CODES:
+            c["days_since_off"] = 0
+        else:
+            c["days_since_off"] = c.get("days_since_off", 0) + 1
+
         c.setdefault("block_history", [])
         c["block_history"].append(flown)
         # keep sliding window of last 28 days
@@ -424,9 +475,11 @@ def advance_to_next_day(state: dict) -> dict:
             c["block_history"] = c["block_history"][-28:]
         c["block_28d_hr"] = round(sum(c["block_history"]), 1)
         c["fdp_used_min"] = 0
-        # Fatigue update
+        # Fatigue update — a day off recovers more than an idle reserve day
         if flown > 0:
             c["fatigue_score"] = min(100, c["fatigue_score"] + random.randint(8, 18))
+        elif day_code == "OFF":
+            c["fatigue_score"] = max(5, c["fatigue_score"] - random.randint(12, 22))
         else:
             c["fatigue_score"] = max(5, c["fatigue_score"] - random.randint(6, 12))
         # Rest
@@ -442,6 +495,12 @@ def advance_to_next_day(state: dict) -> dict:
         # Sickness risk drift
         if c["fatigue_score"] > 70 and random.random() < 0.05:
             c["status"] = "sick"
+        # Honour a pre-planned day off for the incoming day (wins over the reset
+        # above, and keeps the crew out of the standby pool re-draw below).
+        if incoming_day in c.get("days_off_planned", []):
+            c["status"] = "off"
+            c["assigned_flight_id"] = None
+            c["days_off_planned"] = [d for d in c["days_off_planned"] if d != incoming_day]
 
     # Re-establish standby pool (~10% of pool from those still available)
     available = [c for c in state["crew"] if c["status"] == "available"]
@@ -701,6 +760,30 @@ def check_assignment(state: dict, flight_id: str, crew_id: str) -> list[dict]:
             "rule_ref": "ORO.FTL.210(b)",
         })
 
+    # Recurrent days free of duty — operating today adds another consecutive
+    # duty day. Beyond the limit the crew is owed a statutory day off first.
+    dso = crew.get("days_since_off", 0)
+    if dso >= MAX_CONSECUTIVE_DUTY_DAYS:
+        warnings.append({
+            "code": "DAYS_OFF_REQUIRED",
+            "severity": "critical",
+            "message": (
+                f"Crew {crew['id']} has worked {dso} consecutive duty days. A day free of "
+                f"duty is required before further rostering (max {MAX_CONSECUTIVE_DUTY_DAYS})."
+            ),
+            "rule_ref": "ORO.FTL.235(d) — Recurrent days free of duty",
+        })
+    elif dso >= DAYS_OFF_WARN_AT:
+        warnings.append({
+            "code": "DAYS_OFF_DUE",
+            "severity": "warning",
+            "message": (
+                f"Crew {crew['id']} is on consecutive duty day {dso}. Roster a day off within "
+                f"{MAX_CONSECUTIVE_DUTY_DAYS - dso} day(s) to stay legal."
+            ),
+            "rule_ref": "ORO.FTL.235(d) — Recurrent days free of duty",
+        })
+
     # Fatigue
     if crew["fatigue_score"] > 70:
         warnings.append({
@@ -804,6 +887,123 @@ def roster_completeness(state: dict) -> dict:
                 "total_need": need,
             })
     return {"total": total, "complete": complete, "missing": missing}
+
+
+# ------------------- Crew roster line / days off ------------------- #
+
+def _today_duty_code(state: dict, crew: dict) -> str:
+    """Live duty code for the current operational day (calendar 'today' cell)."""
+    if crew.get("status") == "sick":
+        return "SICK"
+    cid = crew["id"]
+    if any(cid in f["assigned_crew_ids"] for f in state["flights"]):
+        return "FLT"
+    st = crew.get("status")
+    if st == "off":
+        return "OFF"
+    if st == "standby":
+        return "SBY"
+    return "AVL"   # available reserve / open
+
+
+def crew_roster(state: dict, past_days: int = 5, future_days: int = 4) -> dict:
+    """Build the AerOPS-style crew calendar: one row per crew, one cell per day.
+    Past cells come from the recorded duty_history, today is live, future cells
+    show planned days off (anything else is open)."""
+    day_number = state.get("day_number", 1)
+    days = list(range(day_number - past_days, day_number + future_days + 1))
+    base_date = datetime.fromisoformat(state["day_start"]).date()
+    columns = [{
+        "day": d,
+        "date": (base_date + timedelta(days=d - day_number)).isoformat(),
+        "is_today": d == day_number,
+        "is_future": d > day_number,
+        "is_past": d < day_number,
+    } for d in days]
+    rows = []
+    for c in state["crew"]:
+        hist = c.get("duty_history", [])
+        planned = set(c.get("days_off_planned", []))
+        dso = c.get("days_since_off", 0)
+        cells = []
+        for d in days:
+            if d < day_number:
+                offset = day_number - d            # 1 == yesterday
+                code = hist[-offset] if offset <= len(hist) else None
+                cells.append({"day": d, "code": code, "rel": "past"})
+            elif d == day_number:
+                cells.append({"day": d, "code": _today_duty_code(state, c), "rel": "today"})
+            else:
+                cells.append({
+                    "day": d,
+                    "code": "OFF" if d in planned else None,
+                    "rel": "future",
+                    "planned_off": d in planned,
+                })
+        rows.append({
+            "crew_id": c["id"],
+            "name": c["name"],
+            "rank": c["rank"],
+            "rank_title": c.get("rank_title", ""),
+            "base": c.get("base", "LHR"),
+            "qualifications": c.get("qualifications", []),
+            "status": c.get("status"),
+            "days_since_off": dso,
+            "fatigue_score": c.get("fatigue_score", 0),
+            "due_off": dso >= DAYS_OFF_WARN_AT,
+            "at_limit": dso >= MAX_CONSECUTIVE_DUTY_DAYS,
+            "cells": cells,
+        })
+    return {
+        "day_number": day_number,
+        "days": days,
+        "columns": columns,
+        "past_days": past_days,
+        "future_days": future_days,
+        "max_consecutive_duty_days": MAX_CONSECUTIVE_DUTY_DAYS,
+        "warn_at": DAYS_OFF_WARN_AT,
+        "crew": rows,
+    }
+
+
+def set_day_off(state: dict, crew_id: str, day: int, off: bool = True) -> dict:
+    """Toggle a day off for a crew member. Future days are queued in
+    days_off_planned (honoured when the sim rolls into that day). The current day
+    can only be changed during the ROSTER phase (before the day starts)."""
+    crew = next((c for c in state["crew"] if c["id"] == crew_id), None)
+    if not crew:
+        return {"ok": False, "error": "crew_not_found"}
+    day_number = state.get("day_number", 1)
+    if day < day_number:
+        return {"ok": False, "error": "cannot_change_past"}
+    planned = crew.setdefault("days_off_planned", [])
+
+    if day == day_number:
+        if state.get("phase") != "ROSTER":
+            return {"ok": False, "error": "day_in_progress"}
+        if off:
+            for f in state["flights"]:
+                if crew_id in f["assigned_crew_ids"]:
+                    f["assigned_crew_ids"].remove(crew_id)
+            crew["assigned_flight_id"] = None
+            crew["status"] = "off"
+        elif crew["status"] == "off":
+            crew["status"] = "available"
+        return {
+            "ok": True, "crew_id": crew_id, "day": day, "off": off,
+            "status": crew["status"], "days_off_planned": planned,
+        }
+
+    # Future day
+    if off and day not in planned:
+        planned.append(day)
+        planned.sort()
+    elif not off and day in planned:
+        planned.remove(day)
+    return {
+        "ok": True, "crew_id": crew_id, "day": day, "off": off,
+        "days_off_planned": planned,
+    }
 
 
 # ------------------- Auto-roster ------------------- #
