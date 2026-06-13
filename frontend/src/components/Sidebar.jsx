@@ -5,6 +5,7 @@ const NAV = [
     { id: "timeline", label: "TIMELINE" },
     { id: "incidents", label: "INCIDENTS" },
     { id: "crew", label: "CREW" },
+    { id: "calendar", label: "DAYS OFF" },
     { id: "advisor", label: "OPS ADVISOR" },
     { id: "regs", label: "FTL REGS" },
 ];

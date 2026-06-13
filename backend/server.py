@@ -49,6 +49,11 @@ class AdvisorReq(BaseModel):
     question: Optional[str] = None
 
 
+class DayOffReq(BaseModel):
+    day: int
+    off: bool = True
+
+
 # ---------------- DB helpers ---------------- #
 async def _load(game_id: str) -> dict:
     doc = await db.games.find_one({"id": game_id}, {"_id": 0})
@@ -88,6 +93,21 @@ async def get_state(game_id: str):
 async def roster_status(game_id: str):
     state = await _load(game_id)
     return sim.roster_completeness(state)
+
+
+@api_router.get("/sim/{game_id}/crew_roster")
+async def crew_roster(game_id: str):
+    state = await _load(game_id)
+    return sim.crew_roster(state)
+
+
+@api_router.post("/sim/{game_id}/crew/{crew_id}/day_off")
+async def set_day_off(game_id: str, crew_id: str, body: DayOffReq):
+    state = await _load(game_id)
+    result = sim.set_day_off(state, crew_id, body.day, off=body.off)
+    if result.get("ok"):
+        await _save(state)
+    return result
 
 
 @api_router.post("/sim/{game_id}/check_assignment/{flight_id}")
