@@ -186,7 +186,18 @@ export default function RosterBoard({ state, onOpenAssign, onStartDay, onUnassig
                                             (CP{assignedByRank.CP} FO{assignedByRank.FO} SC{assignedByRank.SC} CC{assignedByRank.CC})
                                         </span>
                                     </td>
-                                    <td className={`px-3 py-2 ${st.tone}`}>{st.label}</td>
+                                    <td className={`px-3 py-2 ${st.tone}`}>
+                                        {st.label}
+                                        {f.reactionary_min > 0 && (
+                                            <div
+                                                className="uppercase-wide t-warn mt-0.5"
+                                                title={f.note || "Knock-on delay from late inbound"}
+                                                data-testid={`reactionary-${f.callsign}`}
+                                            >
+                                                KNOCK-ON +{f.reactionary_min}M
+                                            </div>
+                                        )}
+                                    </td>
                                     <td className="px-3 py-2 text-right">
                                         <button
                                             data-testid={`assign-${f.callsign}-btn`}
