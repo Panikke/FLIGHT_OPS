@@ -66,6 +66,7 @@ export default function CrewRoster({ state, onChanged }) {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
     const [filter, setFilter] = useState("ALL");
+    const [acFilter, setAcFilter] = useState("ALL");
     const [search, setSearch] = useState("");
     const [busyKey, setBusyKey] = useState(null);
 
@@ -109,6 +110,7 @@ export default function CrewRoster({ state, onChanged }) {
         if (!roster) return [];
         let list = roster.crew;
         if (filter !== "ALL") list = list.filter((c) => c.rank === filter);
+        if (acFilter !== "ALL") list = list.filter((c) => (c.qualifications || []).includes(acFilter));
         if (search) {
             const s = search.toLowerCase();
             list = list.filter(
@@ -119,7 +121,7 @@ export default function CrewRoster({ state, onChanged }) {
         return [...list].sort(
             (a, b) => b.days_since_off - a.days_since_off || (a.crew_id < b.crew_id ? -1 : 1)
         );
-    }, [roster, filter, search]);
+    }, [roster, filter, acFilter, search]);
 
     const summary = useMemo(() => {
         if (!roster) return { atLimit: 0, due: 0 };
@@ -170,6 +172,7 @@ export default function CrewRoster({ state, onChanged }) {
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
                 />
+                <span className="uppercase-wide t-muted ml-1">RANK</span>
                 {["ALL", "CP", "FO", "SC", "CC"].map((r) => (
                     <button
                         key={r}
@@ -178,6 +181,18 @@ export default function CrewRoster({ state, onChanged }) {
                         onClick={() => setFilter(r)}
                     >
                         {r}
+                    </button>
+                ))}
+                <span className="uppercase-wide t-muted ml-2">TYPE</span>
+                {["ALL", "A320", "A350", "B777"].map((t) => (
+                    <button
+                        key={t}
+                        data-testid={`roster-actype-${t}`}
+                        className={`btn ${acFilter === t ? "btn-primary" : ""}`}
+                        onClick={() => setAcFilter(t)}
+                        title="Filter crew by type rating"
+                    >
+                        {t}
                     </button>
                 ))}
                 <div className="flex-1" />
