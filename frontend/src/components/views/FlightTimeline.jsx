@@ -160,7 +160,7 @@ export default function FlightTimeline({ state }) {
                                                     key={f.id}
                                                     className={`absolute top-2 h-10 border-l-2 ${flightTone(f)} px-2 py-1 font-mono-jb text-[11px] overflow-hidden`}
                                                     style={{ left, width }}
-                                                    title={`${f.callsign} ${f.origin}-${f.destination} STD ${f.std.slice(11, 16)} status=${f.status} dly=${delay}`}
+                                                    title={`${f.callsign} ${f.origin}-${f.destination} STD ${f.std.slice(11, 16)} status=${f.status} dly=${delay}${f.reactionary_min ? ` (knock-on ${f.reactionary_min}m: ${f.note || "inbound late"})` : ""}`}
                                                     data-testid={`block-${f.callsign}`}
                                                 >
                                                     <div className="leading-tight flex items-center gap-1">
@@ -170,6 +170,9 @@ export default function FlightTimeline({ state }) {
                                                     </div>
                                                     <div className="t-muted">
                                                         {f.std.slice(11, 16)}{delay > 0 ? ` (+${delay})` : ""}
+                                                        {f.reactionary_min > 0 && (
+                                                            <span className="t-warn" title="Knock-on delay from late inbound"> ·R{f.reactionary_min}</span>
+                                                        )}
                                                     </div>
                                                 </div>
                                             );

@@ -74,6 +74,8 @@ MAX_FDP_MIN_LONGHAUL_BUNK = 18 * 60   # long-haul, augmented crew + Class 1 bunk
 MAX_BLOCK_28D_HR = 100
 MAX_DUTY_7D_HR = 60
 MAX_DUTY_7D_MIN = MAX_DUTY_7D_HR * 60
+MIN_TURNAROUND_MIN = 45          # minimum ground time before the same tail departs again
+DIVERSION_RECOVERY_MIN = 120     # extra positioning time after a diversion before next sector
 
 
 def _fdp_cap_for_flight(flight: dict) -> tuple[int, str]:
@@ -1025,8 +1027,14 @@ def tick(state: dict, minutes: int = 30) -> dict:
         new_incidents.append(inc)
         state["incidents"].append(inc)
 
+    reactionary = propagate_reactionary_delays(state)
     _recompute_kpis(state)
-    return {"ok": True, "new_incidents": new_incidents, "clock": state["clock"]}
+    return {
+        "ok": True,
+        "new_incidents": new_incidents,
+        "reactionary_delays": reactionary,
+        "clock": state["clock"],
+    }
 
 
 def _missing_ranks(state: dict, flight: dict) -> list[str]:
@@ -1289,8 +1297,72 @@ def resolve_incident(state: dict, incident_id: str, action: str) -> dict:
         "ts": state["clock"], "incident_id": incident_id, "action": action,
         "cost_usd": cost, "otp_hit": otp_hit
     })
+    reactionary = propagate_reactionary_delays(state)
     _recompute_kpis(state)
-    return {"ok": True, "incident": inc, "kpis": state["kpis"]}
+    return {
+        "ok": True,
+        "incident": inc,
+        "kpis": state["kpis"],
+        "reactionary_delays": reactionary,
+    }
+
+
+def propagate_reactionary_delays(state: dict) -> list[dict]:
+    """Roll knock-on (reactionary) delays down each aircraft's day.
+
+    For every tail, walk its sectors in schedule order tracking when the
+    aircraft is actually ready again (estimated arrival + minimum turnaround).
+    Any later sector that would depart before its aircraft is ready picks up
+    the difference as reactionary delay. Re-running is safe: applied delay
+    feeds back into the effective departure time, so a sector is only pushed
+    further if its inbound slipped further since the last pass.
+    """
+    affected: list[dict] = []
+    by_reg: dict[str, list[dict]] = {}
+    for f in state["flights"]:
+        by_reg.setdefault(f["aircraft_reg"], []).append(f)
+
+    for _reg, sectors in by_reg.items():
+        sectors.sort(key=lambda f: f["std"])
+        ready_at: datetime | None = None
+        inbound: dict | None = None
+        for f in sectors:
+            if f["status"] == "cancelled":
+                # Sector never flies; the tail stays wherever it was.
+                continue
+            std = datetime.fromisoformat(f["std"])
+            eff_dep = std + timedelta(minutes=f.get("delay_min", 0))
+            if (
+                ready_at is not None
+                and eff_dep < ready_at
+                and f["status"] in ("scheduled", "delayed", "boarding")
+            ):
+                extra = int((ready_at - eff_dep).total_seconds() // 60)
+                if extra > 0:
+                    f["delay_min"] += extra
+                    f["reactionary_min"] = f.get("reactionary_min", 0) + extra
+                    if f["status"] == "scheduled":
+                        f["status"] = "delayed"
+                    note = f.get("note") or ""
+                    if not note or note.startswith("REACTIONARY"):
+                        f["note"] = (
+                            f"REACTIONARY · inbound {inbound['callsign']} late"
+                            if inbound else "REACTIONARY · aircraft late"
+                        )
+                    affected.append({
+                        "flight_id": f["id"],
+                        "callsign": f["callsign"],
+                        "added_min": extra,
+                        "inbound_callsign": inbound["callsign"] if inbound else None,
+                    })
+                    eff_dep = std + timedelta(minutes=f["delay_min"])
+            eff_arr = eff_dep + timedelta(minutes=f["block_min"])
+            turnaround = MIN_TURNAROUND_MIN + (
+                DIVERSION_RECOVERY_MIN if f["status"] == "diverted" else 0
+            )
+            ready_at = eff_arr + timedelta(minutes=turnaround)
+            inbound = f
+    return affected
 
 
 def _recompute_kpis(state: dict) -> None:
@@ -1338,6 +1410,7 @@ def restart_day(state: dict) -> dict:
     for f in state["flights"]:
         f["status"] = "scheduled"
         f["delay_min"] = 0
+        f["reactionary_min"] = 0
         # Don't clobber the night-stop return note
         if not (f.get("note") or "").startswith("RETURN FROM NIGHT-STOP"):
             f["note"] = ""
