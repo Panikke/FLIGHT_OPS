@@ -24,17 +24,19 @@ function FdpBar({ fdpUsedMin }) {
 
 export default function CrewPanel({ state }) {
     const [filter, setFilter] = useState("ALL");
+    const [acFilter, setAcFilter] = useState("ALL");
     const [search, setSearch] = useState("");
 
     const crew = useMemo(() => {
         let list = state.crew;
         if (filter !== "ALL") list = list.filter((c) => c.rank === filter);
+        if (acFilter !== "ALL") list = list.filter((c) => (c.qualifications || []).includes(acFilter));
         if (search) {
             const s = search.toLowerCase();
             list = list.filter((c) => c.id.toLowerCase().includes(s) || c.name.toLowerCase().includes(s));
         }
         return list;
-    }, [state.crew, filter, search]);
+    }, [state.crew, filter, acFilter, search]);
 
     const counts = {
         total: state.crew.length,
@@ -56,13 +58,14 @@ export default function CrewPanel({ state }) {
                     TOTAL {counts.total} · AVL <span className="t-nominal">{counts.available}</span> · DUTY <span className="t-info">{counts.on_duty}</span> · STBY <span className="t-warn">{counts.standby}</span> · SICK <span className="t-crit">{counts.sick}</span>
                 </div>
             </div>
-            <div className="px-4 py-2 border-b border-white/10 flex gap-2 items-center">
+            <div className="px-4 py-2 border-b border-white/10 flex gap-2 items-center flex-wrap">
                 <input
                     data-testid="crew-search-input"
                     placeholder="SEARCH"
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
                 />
+                <span className="uppercase-wide t-muted ml-1">RANK</span>
                 {["ALL", "CP", "FO", "SC", "CC"].map((r) => (
                     <button
                         key={r}
@@ -71,6 +74,18 @@ export default function CrewPanel({ state }) {
                         onClick={() => setFilter(r)}
                     >
                         {r}
+                    </button>
+                ))}
+                <span className="uppercase-wide t-muted ml-2">TYPE</span>
+                {["ALL", "A320", "A350", "B777"].map((t) => (
+                    <button
+                        key={t}
+                        data-testid={`crew-actype-${t}`}
+                        className={`btn ${acFilter === t ? "btn-primary" : ""}`}
+                        onClick={() => setAcFilter(t)}
+                        title="Filter crew by type rating"
+                    >
+                        {t}
                     </button>
                 ))}
             </div>
