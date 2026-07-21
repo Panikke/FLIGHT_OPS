@@ -59,16 +59,28 @@ function IncidentCard({ inc, state, onResolve, onAskAdvisor }) {
     const flight = state.flights.find((f) => f.id === inc.flight_id);
     return (
         <div className={`border-b border-white/[0.06] border-l-4 ${tone} px-4 py-3`} data-testid={`incident-${inc.id}`}>
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 flex-wrap">
                 <span className="badge t-info">{inc.id}</span>
                 <span className="font-azeret t-info">{KIND_LABEL[inc.type] || inc.type}</span>
                 <span className={`badge ${inc.severity === "major" ? "t-crit" : "t-warn"}`}>
                     {inc.severity.toUpperCase()}
                 </span>
+                {inc.escalated && (
+                    <span className="badge t-crit" data-testid={`incident-escalated-${inc.id}`} title={inc.escalation_note}>
+                        ESCALATED
+                    </span>
+                )}
+                {inc.delay_code && (
+                    <span className="badge t-muted" title="IATA standard delay code">
+                        DLY {inc.delay_code}
+                    </span>
+                )}
                 <span className="uppercase-wide t-sec">
                     {inc.flight_callsign} {flight ? `${flight.origin}→${flight.destination}` : ""}
                 </span>
-                <span className="uppercase-wide t-muted ml-auto">RAISED {inc.raised_at?.slice(11, 16)}Z</span>
+                <span className="uppercase-wide t-muted ml-auto">
+                    {inc.reported_by ? `${inc.reported_by} · ` : ""}RAISED {inc.raised_at?.slice(11, 16)}Z
+                </span>
                 <span
                     className={`badge ${inc.status === "open" ? "t-warn" : "t-nominal"}`}
                     data-testid={`incident-status-${inc.id}`}
@@ -77,6 +89,9 @@ function IncidentCard({ inc, state, onResolve, onAskAdvisor }) {
                 </span>
             </div>
             <div className="mt-2 text-sm">{inc.description}</div>
+            {inc.escalation_note && (
+                <div className="mt-1 font-mono-jb text-xs t-crit">{inc.escalation_note}</div>
+            )}
             {inc.affected_crew_name && (
                 <div className="mt-1 font-mono-jb text-xs t-crit">
                     AFFECTED: {inc.affected_crew_id} {inc.affected_crew_name}

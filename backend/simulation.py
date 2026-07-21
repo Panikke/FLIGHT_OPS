@@ -399,6 +399,7 @@ def new_game(scenario: str = "free_play") -> dict:
             "otp_pct": 100.0,
             "legality_breaches": 0,
             "curfew_violations": 0,
+            "compensation_usd": 0,
             "fatigue_index": 25,
             "cost_usd": 0,
             "pax_delay_min": 0,
@@ -642,6 +643,7 @@ def advance_to_next_day(state: dict) -> dict:
         "otp_pct": 100.0,
         "legality_breaches": 0,
         "curfew_violations": 0,
+        "compensation_usd": 0,
         "fatigue_index": int(sum(c["fatigue_score"] for c in state["crew"]) / max(1, len(state["crew"]))),
         "cost_usd": 0,
         "pax_delay_min": 0,
@@ -1186,26 +1188,97 @@ def auto_roster(state: dict) -> dict:
 
 # ------------------- Day-of-Ops simulation ------------------- #
 
+# Type weights informed by real delay-cause data (US DOT/BTS Air Travel
+# Consumer Report; Eurocontrol CODA). Of the delay actually attributable to a
+# single flight's own disruption (i.e. excluding reactionary/knock-on delay,
+# which is the single largest real cause at 46-48% of delay minutes per
+# Eurocontrol and is already modelled separately by
+# propagate_reactionary_delays), the remainder splits roughly evenly across
+# airline-internal causes (crew + technical/maintenance, ~31% of delayed
+# flights per BTS), ATC/airspace-system causes (~31%), and weather (smaller
+# in BTS's narrow "extreme weather" bucket, but weather's true footprint is
+# much larger once its contribution to ATC-flow and reactionary delay is
+# included — CODA and FAA both attribute a majority of NAS delay to weather
+# at the root). The previous weights over-indexed on crew-specific causes
+# relative to this evidence.
 INCIDENT_TYPES = [
-    ("CREW_SICK", 0.30, "Crew reported sick before report time."),
-    ("LATE_REPORT", 0.15, "Crew running late for report."),
-    ("WEATHER", 0.20, "Weather disruption at destination."),
-    ("TECH", 0.20, "Technical defect / MEL deferral on aircraft."),
-    ("ATC_FLOW", 0.15, "ATC slot / flow restriction imposed."),
+    ("CREW_SICK", 0.15, "Crew reported sick before report time."),
+    ("LATE_REPORT", 0.10, "Crew running late for report."),
+    ("WEATHER", 0.25, "Weather disruption at destination."),
+    ("TECH", 0.25, "Technical defect / MEL deferral on aircraft."),
+    ("ATC_FLOW", 0.25, "ATC slot / flow restriction imposed."),
 ]
 
-
-# Survive-7 difficulty curve: per-tick max incidents weighted [0,1,2,3]
-# Day 1 mild → Day 7 brutal. Used only in challenge mode.
-SURVIVE_7_CURVE = {
-    1: {"weights": [60, 30, 10, 0],  "weather_mult": 1.0, "tech_mult": 1.0, "sick_mult": 1.0},
-    2: {"weights": [55, 32, 12, 1],  "weather_mult": 1.1, "tech_mult": 1.0, "sick_mult": 1.0},
-    3: {"weights": [45, 35, 17, 3],  "weather_mult": 1.3, "tech_mult": 1.2, "sick_mult": 1.1},
-    4: {"weights": [35, 38, 22, 5],  "weather_mult": 1.6, "tech_mult": 1.4, "sick_mult": 1.3},
-    5: {"weights": [20, 35, 30, 15], "weather_mult": 2.2, "tech_mult": 1.6, "sick_mult": 1.5},
-    6: {"weights": [15, 30, 35, 20], "weather_mult": 2.0, "tech_mult": 2.0, "sick_mult": 1.6},
-    7: {"weights": [10, 25, 35, 30], "weather_mult": 1.8, "tech_mult": 2.5, "sick_mult": 1.8},
+# A real OCC is a room of specialist desks (Duty Ops Manager, Flight Dispatch,
+# Crew Control, Maintenance Control, network/ATC liaison) and every delay is
+# logged under a standard two-digit IATA delay code. Incidents carry both: the
+# desk that raised them and the code the delay would be filed under.
+#   63 late/absent crew · 64 crew shortage · 41 aircraft defect
+#   72 destination weather · 81 ATFM/ATC en-route restriction · 93 reactionary
+INCIDENT_META = {
+    "CREW_SICK":   {"desk": "CREW CONTROL", "delay_code": "64"},
+    "LATE_REPORT": {"desk": "CREW CONTROL", "delay_code": "63"},
+    "TECH":        {"desk": "MX CONTROL",   "delay_code": "41"},
+    "WEATHER":     {"desk": "DISPATCH",     "delay_code": "72"},
+    "ATC_FLOW":    {"desk": "NETWORK/ATC",  "delay_code": "81"},
 }
+
+# The operation never pauses for a problem — but a problem you sit on gets
+# worse. An open incident left unattended this long escalates: severity goes
+# major, the flight takes further delay, and the recovery menu is re-priced
+# from the (worse) live state. This replaces the old forced clock-pause with
+# the time pressure a real duty controller actually faces.
+ESCALATION_AFTER_MIN = 60
+ESCALATION_EXTRA_DELAY_MIN = 30
+
+# EU261/UK261-style passenger compensation: due when a flight ARRIVES 3h+
+# late, per passenger, scaled by haul — UNLESS the root cause is an
+# "extraordinary circumstance" outside the airline's control (weather, ATC),
+# mirroring the real regulation. This is what makes delay-vs-cancel a genuine
+# economic decision in a real OCC.
+COMP_ARR_DELAY_THRESHOLD_MIN = 180
+COMP_SHORT_HAUL_USD = 250   # ≈ £220 per pax
+COMP_LONG_HAUL_USD = 600    # ≈ £520 per pax
+COMP_EXEMPT_INCIDENT_TYPES = ("WEATHER", "ATC_FLOW")
+
+# Expected NEW (primary) incidents per sim-hour of active ops. Deliberately
+# calibrated well above the bare real-world rate (BTS/CODA data implies
+# roughly 2-4 primary-cause disruptions across an average ~20-25 flight day)
+# for pacing — this is a "hardcore" simulation, not a punctuality replica —
+# but a fraction of the previous per-tick rate, which scaled with the NUMBER
+# of tick() calls rather than elapsed time and so produced wildly more
+# incidents at fine tick granularity (e.g. +5M ticks) than coarse (+60M).
+BASE_INCIDENT_RATE_PER_HOUR = 0.4  # ~6-8 primary incidents across a full ops day
+
+# Survive-7 difficulty curve: a rate MULTIPLIER on BASE_INCIDENT_RATE_PER_HOUR
+# (day 1 mild -> day 7 brutal), preserving the shape of the original per-tick
+# weight tables but expressed as a continuous rate so it composes correctly
+# with Poisson sampling over arbitrary tick lengths. Used only in challenge mode.
+SURVIVE_7_CURVE = {
+    1: {"rate_mult": 1.0, "weather_mult": 1.0, "tech_mult": 1.0, "sick_mult": 1.0},
+    2: {"rate_mult": 1.2, "weather_mult": 1.1, "tech_mult": 1.0, "sick_mult": 1.0},
+    3: {"rate_mult": 1.55, "weather_mult": 1.3, "tech_mult": 1.2, "sick_mult": 1.1},
+    4: {"rate_mult": 1.95, "weather_mult": 1.6, "tech_mult": 1.4, "sick_mult": 1.3},
+    5: {"rate_mult": 2.8, "weather_mult": 2.2, "tech_mult": 1.6, "sick_mult": 1.5},
+    6: {"rate_mult": 3.2, "weather_mult": 2.0, "tech_mult": 2.0, "sick_mult": 1.6},
+    7: {"rate_mult": 3.7, "weather_mult": 1.8, "tech_mult": 2.5, "sick_mult": 1.8},
+}
+
+
+def _poisson_sample(lam: float, cap: int = 4) -> int:
+    """Sample an event count from a Poisson distribution (Knuth's algorithm —
+    no numpy dependency), capped to keep any single tick from spawning an
+    unreasonable pile-up. `lam` is the expected count for this interval."""
+    if lam <= 0:
+        return 0
+    limit = math.exp(-lam)
+    k = 0
+    p = 1.0
+    while True:
+        k += 1
+        p *= random.random()
+        if p <= limit:
+            return min(k - 1, cap)
 
 
 def _in_curfew_window(dt: datetime) -> bool:
@@ -1233,6 +1306,32 @@ def _apply_curfew_violation(state: dict, flight: dict, kind: str) -> dict:
     }
 
 
+def _maybe_charge_compensation(state: dict, flight: dict) -> dict | None:
+    """EU261/UK261-style passenger compensation, assessed once when a flight
+    lands: 3h+ arrival delay owes per-pax compensation scaled by haul, unless
+    the flight was hit by an extraordinary-circumstances cause (weather/ATC),
+    which exempts the airline — exactly the calculus a real OCC runs when
+    weighing an airline-controllable delay against a cancellation."""
+    if flight.get("comp_charged") or flight.get("comp_exempt"):
+        return None
+    if flight.get("delay_min", 0) < COMP_ARR_DELAY_THRESHOLD_MIN:
+        return None
+    rate = COMP_LONG_HAUL_USD if flight["block_min"] > 360 else COMP_SHORT_HAUL_USD
+    amount = rate * flight.get("pax_count", 0)
+    flight["comp_charged"] = True
+    state["kpis"]["compensation_usd"] = state["kpis"].get("compensation_usd", 0) + amount
+    state["kpis"]["cost_usd"] += amount
+    note = flight.get("note") or ""
+    tag = "EU261 COMP DUE"
+    flight["note"] = f"{note} · {tag}" if note else tag
+    return {
+        "flight_id": flight["id"],
+        "callsign": flight["callsign"],
+        "amount_usd": amount,
+        "pax": flight.get("pax_count", 0),
+    }
+
+
 def tick(state: dict, minutes: int = 30) -> dict:
     """Advance the simulation clock by `minutes`. May spawn incidents."""
     if state["phase"] != "OPS":
@@ -1243,6 +1342,7 @@ def tick(state: dict, minutes: int = 30) -> dict:
 
     # ---- Flight lifecycle progression ----
     curfew_violations = []
+    comp_events = []
     for f in state["flights"]:
         if f["status"] in ("cancelled", "diverted", "landed"):
             continue
@@ -1268,6 +1368,9 @@ def tick(state: dict, minutes: int = 30) -> dict:
             f["status"] = "landed"
             # Accumulate FDP for crew on this flight when it lands
             if prev != "landed":
+                comp = _maybe_charge_compensation(state, f)
+                if comp:
+                    comp_events.append(comp)
                 for cid in f["assigned_crew_ids"]:
                     c = next((cc for cc in state["crew"] if cc["id"] == cid), None)
                     if c:
@@ -1286,20 +1389,24 @@ def tick(state: dict, minutes: int = 30) -> dict:
                 f["status"] = "boarding"
 
     new_incidents = []
-    # Spawn incidents per tick, weighted (challenge mode: escalates with day)
+    # Spawn incidents at a rate scaled by elapsed sim-time (not by number of
+    # tick() calls — a flat per-tick chance made incident count depend on how
+    # finely the player ticked, e.g. far more incidents/day at +5M than +60M
+    # for the same span of ops). Challenge mode escalates the rate with day.
     if state.get("is_challenge"):
         day = state.get("day_number", 1)
         curve = SURVIVE_7_CURVE.get(day, SURVIVE_7_CURVE[7])
-        weights = curve["weights"]
+        rate_mult = curve["rate_mult"]
         type_weight_mult = {
             "CREW_SICK": curve["sick_mult"],
             "WEATHER": curve["weather_mult"],
             "TECH": curve["tech_mult"],
         }
-        n = random.choices([0, 1, 2, 3], weights=weights)[0]
     else:
-        n = random.choices([0, 1, 2], weights=[50, 35, 15])[0]
+        rate_mult = 1.0
         type_weight_mult = {}
+    lam = BASE_INCIDENT_RATE_PER_HOUR * rate_mult * (minutes / 60.0)
+    n = _poisson_sample(lam)
     for _ in range(n):
         adj_weights = [
             i[1] * type_weight_mult.get(i[0], 1.0)
@@ -1316,6 +1423,7 @@ def tick(state: dict, minutes: int = 30) -> dict:
             continue
         flight = random.choice(upcoming)
         sev = random.choice(["minor", "major"])
+        meta = INCIDENT_META.get(kind, {})
         inc = {
             "id": _hash_id("INC"),
             "type": kind,
@@ -1327,7 +1435,15 @@ def tick(state: dict, minutes: int = 30) -> dict:
             "status": "open",
             "resolution": None,
             "options": [],
+            "reported_by": meta.get("desk"),
+            "delay_code": meta.get("delay_code"),
+            "escalated": False,
         }
+        # Weather/ATC are "extraordinary circumstances" under EU261/UK261 —
+        # a flight disrupted by them owes no passenger compensation however
+        # late it eventually arrives.
+        if kind in COMP_EXEMPT_INCIDENT_TYPES:
+            flight["comp_exempt"] = True
         # Apply immediate impact
         if kind == "CREW_SICK" and flight["assigned_crew_ids"]:
             # mark one assigned crew as sick — off the whole pairing (one duty)
@@ -1361,6 +1477,35 @@ def tick(state: dict, minutes: int = 30) -> dict:
         new_incidents.append(inc)
         state["incidents"].append(inc)
 
+    # ---- Escalate unattended incidents (the price of not deciding) ----
+    escalations = []
+    for inc in state["incidents"]:
+        if inc["status"] != "open" or inc.get("escalated"):
+            continue
+        raised = datetime.fromisoformat(inc["raised_at"])
+        if (clock - raised).total_seconds() / 60 < ESCALATION_AFTER_MIN:
+            continue
+        fl = next((f for f in state["flights"] if f["id"] == inc["flight_id"]), None)
+        if not fl or fl["status"] not in ("scheduled", "delayed", "boarding"):
+            continue  # overtaken by events — nothing left to escalate into
+        inc["escalated"] = True
+        inc["severity"] = "major"
+        fl["delay_min"] += ESCALATION_EXTRA_DELAY_MIN
+        if fl["status"] == "scheduled":
+            fl["status"] = "delayed"
+        # Re-price the menu from the now-worse live state (major severity also
+        # closes doors, e.g. MEL deferral is minor-only).
+        inc["options"] = _recovery_options_for(state, fl, inc["type"], "major")
+        inc["escalation_note"] = (
+            f"Unattended {ESCALATION_AFTER_MIN}min — severity raised to MAJOR, "
+            f"{fl['callsign']} +{ESCALATION_EXTRA_DELAY_MIN}min"
+        )
+        escalations.append({
+            "incident_id": inc["id"],
+            "flight_callsign": fl["callsign"],
+            "added_min": ESCALATION_EXTRA_DELAY_MIN,
+        })
+
     reactionary = propagate_reactionary_delays(state)
     _recompute_kpis(state)
     return {
@@ -1368,6 +1513,8 @@ def tick(state: dict, minutes: int = 30) -> dict:
         "new_incidents": new_incidents,
         "reactionary_delays": reactionary,
         "curfew_violations": curfew_violations,
+        "escalations": escalations,
+        "compensation_events": comp_events,
         "clock": state["clock"],
     }
 
@@ -1681,8 +1828,8 @@ def propagate_reactionary_delays(state: dict) -> list[dict]:
                     note = f.get("note") or ""
                     if not note or note.startswith("REACTIONARY"):
                         f["note"] = (
-                            f"REACTIONARY · inbound {inbound['callsign']} late"
-                            if inbound else "REACTIONARY · aircraft late"
+                            f"REACTIONARY (IATA 93) · inbound {inbound['callsign']} late"
+                            if inbound else "REACTIONARY (IATA 93) · aircraft late"
                         )
                     affected.append({
                         "flight_id": f["id"],
@@ -1736,6 +1883,7 @@ def restart_day(state: dict) -> dict:
         "otp_pct": 100.0,
         "legality_breaches": 0,
         "curfew_violations": 0,
+        "compensation_usd": 0,
         "fatigue_index": int(sum(c["fatigue_score"] for c in state["crew"]) / max(1, len(state["crew"]))),
         "cost_usd": 0,
         "pax_delay_min": 0,
@@ -1747,6 +1895,14 @@ def restart_day(state: dict) -> dict:
         f["status"] = "scheduled"
         f["delay_min"] = 0
         f["reactionary_min"] = 0
+        # One-shot per-day flags must re-arm on a restart (the curfew-checked
+        # flags previously survived restarts, so a restarted day was never
+        # curfew-checked again — latent bug fixed alongside the comp flags)
+        f.pop("curfew_dep_checked", None)
+        f.pop("curfew_arr_checked", None)
+        f.pop("curfew_violation", None)
+        f.pop("comp_charged", None)
+        f.pop("comp_exempt", None)
         # Don't clobber the night-stop return note
         if not (f.get("note") or "").startswith("RETURN FROM NIGHT-STOP"):
             f["note"] = ""
