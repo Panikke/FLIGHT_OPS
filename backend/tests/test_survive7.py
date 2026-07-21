@@ -32,8 +32,10 @@ class TestBunkFDP:
         if not lh:
             pytest.skip("No ULR flight generated in this seed")
         for f in lh:
-            assert f["required_crew"]["CP"] == 2, f
-            assert f["required_crew"]["FO"] == 2, f
+            # A single Captain operates every sector; augmentation is carried
+            # entirely by relief First Officers (see simulation._relief_pilots_for).
+            assert f["required_crew"]["CP"] == 1, f
+            assert f["required_crew"]["FO"] >= 2, f
             assert f["aircraft_type"] in ("A350", "B777")
 
     def test_short_haul_unaugmented(self):

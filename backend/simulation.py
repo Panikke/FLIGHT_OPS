@@ -101,7 +101,10 @@ def _fdp_cap_for_flight(flight: dict) -> tuple[int, str]:
     # Long-haul
     rest_class = AIRCRAFT_TYPES.get(ac_type, {}).get("crew_rest_class", "none")
     req = flight.get("required_crew", {})
-    augmented = req.get("CP", 1) >= 2 and req.get("FO", 1) >= 2
+    # Augmentation is carried entirely by relief First Officers now (a single
+    # Captain operates every sector — see _required_crew_for) — so "augmented"
+    # means a relief pilot is rostered, i.e. FO count above the base of 1.
+    augmented = req.get("FO", 1) >= 2
     if augmented and rest_class == "class_1":
         return MAX_FDP_MIN_LONGHAUL_BUNK, f"long-haul augmented crew + Class 1 bunks ({ac_type})"
     return MAX_FDP_MIN_LONGHAUL_BASE, f"long-haul ({ac_type}) without bunk/augment extension"
@@ -145,11 +148,13 @@ CREW_SUPPLY_BUFFER = 1.3
 
 def _expected_daily_crew_demand() -> dict[tuple[str, str], float]:
     """Expected crew-slot demand per (rank, type), derived from the fleet and
-    route-generation rules (not sampled from one game's random flights, so it
-    stays stable across every day of a campaign). A320 rotation count and
-    long-haul route/augmentation are both randomised per aircraft per day —
-    this averages over those distributions rather than assuming worst case,
-    which would wildly over-provision the crew pool."""
+    route-generation rules via _required_crew_for (single source of truth for
+    crew composition — no duplicated headcount logic to drift out of sync).
+    Not sampled from one game's random flights, so it stays stable across
+    every day of a campaign. A320 rotation count and long-haul route choice
+    are both randomised per aircraft per day — this averages over those
+    distributions rather than assuming worst case, which would wildly
+    over-provision the crew pool."""
     demand: dict[tuple[str, str], float] = {}
 
     def add(rank: str, t: str, n: float) -> None:
@@ -158,23 +163,18 @@ def _expected_daily_crew_demand() -> dict[tuple[str, str], float]:
     a320_count = sum(1 for ac in FLEET if ac["type"] == "A320")
     if a320_count:
         avg_rotations = sum(range(2, 4)) / len(range(2, 4))  # random.choice([2, 3])
-        add("CP", "A320", a320_count * avg_rotations)
-        add("FO", "A320", a320_count * avg_rotations)
-        add("SC", "A320", a320_count * avg_rotations)
-        add("CC", "A320", a320_count * avg_rotations * 3)
+        req = _required_crew_for("A320", 0)  # block length doesn't affect A320 composition
+        for rank in ("CP", "FO", "SC", "CC"):
+            add(rank, "A320", a320_count * avg_rotations * req[rank])
 
     for t in ("A350", "B777"):
         fleet_count = sum(1 for ac in FLEET if ac["type"] == t)
         choices = [r for r in ROUTES_LONG if r[3] == t]
         if not fleet_count or not choices:
             continue
-        avg_augmented = sum(1 for r in choices if r[2] > 540) / len(choices)
-        avg_cp = 1 + avg_augmented  # 1 CP normally, 2 if augmented
-        cc = 7 if t == "B777" else 6
-        add("CP", t, fleet_count * avg_cp)
-        add("FO", t, fleet_count * 2)
-        add("SC", t, fleet_count * 1)
-        add("CC", t, fleet_count * cc)
+        for rank in ("CP", "FO", "SC", "CC"):
+            avg_req = sum(_required_crew_for(t, r[2])[rank] for r in choices) / len(choices)
+            add(rank, t, fleet_count * avg_req)
 
     return demand
 
@@ -327,17 +327,31 @@ def _make_flight(fnum, origin, dest, std, sta, block, ac, pairing_id):
     }
 
 
+def _relief_pilots_for(block_min: int) -> int:
+    """Extra flight-deck pilots for cruise relief on long sectors, modelled as
+    additional First Officers rather than a separate rank — one relief pilot
+    covers rest breaks up to ~12h, two beyond that. A single Captain operates
+    every sector regardless of length; only the FO count scales."""
+    if block_min <= 540:      # <= 9h: standard 2-pilot crew, no relief needed
+        return 0
+    if block_min < 720:       # 9-12h: one relief pilot (3-pilot flight deck)
+        return 1
+    return 2                  # 12h+: two relief pilots (4-pilot flight deck)
+
+
 def _required_crew_for(ac_type: str, block_min: int) -> dict:
+    """Standard airline crew composition: 1 Captain + 1 First Officer (plus
+    relief pilots on long sectors), 1 inflight/cabin manager (plus 1 purser
+    on long-haul), and 1 cabin crew member per 50 certified seats."""
+    seats = AIRCRAFT_TYPES[ac_type]["seats"]
+    cc = math.ceil(seats / 50)
     if ac_type == "A320":
-        return {"CP": 1, "FO": 1, "SC": 1, "CC": 3, "type_qual": "A320"}
-    # Long-haul: augmented crew (2 CP + 2 FO) on sectors that need extended FDP.
-    # Threshold ~9h block ≈ projected FDP > 11h → augmentation needed.
-    augmented = block_min > 540  # >9h
+        return {"CP": 1, "FO": 1, "SC": 1, "CC": cc, "type_qual": ac_type}
     return {
-        "CP": 2 if augmented else 1,
-        "FO": 2,  # long-haul always 2 FOs
-        "SC": 1,
-        "CC": 7 if ac_type == "B777" else 6,
+        "CP": 1,
+        "FO": 1 + _relief_pilots_for(block_min),
+        "SC": 2,  # inflight manager + purser
+        "CC": cc,
         "type_qual": ac_type,
     }
 
