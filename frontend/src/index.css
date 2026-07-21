@@ -12,7 +12,8 @@
     --border-strong: rgba(255, 255, 255, 0.22);
     --txt-primary: #f4f4f5;
     --txt-secondary: #a1a1aa;
-    --txt-muted: #52525b;
+    /* ~5:1 on --bg-primary — was #52525b (~2.6:1, fails WCAG AA) */
+    --txt-muted: #7d7d87;
     --status-nominal: #00e676;
     --status-warning: #ffc107;
     --status-critical: #ff3b30;
@@ -44,6 +45,18 @@
 
 * {
     border-color: var(--border-grid);
+}
+
+/* Focus system — cyan ring on every keyboard-focusable control, matching
+   --status-info so it reads as "interactive/identity" rather than a
+   mismatched browser default. Mouse/touch clicks don't trigger :focus-visible,
+   so this never appears as an unwanted click artifact. */
+:focus-visible {
+    outline: 2px solid var(--status-info);
+    outline-offset: 2px;
+}
+.focus-ring-inset:focus-visible {
+    outline-offset: -2px;
 }
 
 html,
@@ -249,6 +262,21 @@ body {
     );
 }
 
+@media (prefers-reduced-motion: reduce) {
+    .cursor-blink::after {
+        animation: none;
+        opacity: 1;
+    }
+    .telex {
+        animation: none;
+    }
+    * {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+}
+
 /* Duty block colours */
 .duty-flight {
     background: rgba(0, 229, 255, 0.18);
@@ -289,10 +317,14 @@ textarea {
     padding: 6px 10px;
     font-family: "JetBrains Mono", monospace;
     font-size: 12px;
-    outline: none;
 }
 input:focus,
 select:focus,
 textarea:focus {
     border-color: var(--status-info);
+}
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+    outline-offset: 0;
 }

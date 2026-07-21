@@ -74,6 +74,7 @@ export default function HeaderBar({
                             onClick={() => onChangeSpeed(Math.max(1, speed - 1))}
                             disabled={speed <= 1}
                             title="Slower"
+                            aria-label="Decrease simulation speed"
                         >
                             ◀◀
                         </button>
@@ -81,6 +82,7 @@ export default function HeaderBar({
                             data-testid="play-pause-btn"
                             className={`btn ${playing ? "btn-warn" : "btn-ok"}`}
                             onClick={onTogglePlay}
+                            aria-pressed={playing}
                         >
                             {playing ? "⏸ PAUSE" : "▶ PLAY"}
                         </button>
@@ -90,10 +92,11 @@ export default function HeaderBar({
                             onClick={() => onChangeSpeed(Math.min(4, speed + 1))}
                             disabled={speed >= 4}
                             title="Faster"
+                            aria-label="Increase simulation speed"
                         >
                             ▶▶
                         </button>
-                        <div className="flex border border-white/20">
+                        <div className="flex border border-white/20" role="group" aria-label="Simulation speed">
                             {[
                                 { id: 1, label: "1×" },
                                 { id: 2, label: "2×" },
@@ -104,7 +107,9 @@ export default function HeaderBar({
                                     key={s.id}
                                     data-testid={`speed-${s.id}`}
                                     onClick={() => onChangeSpeed(s.id)}
-                                    className={`font-mono-jb uppercase text-[11px] tracking-widest px-3 py-2 border-r border-white/10 last:border-r-0 ${
+                                    aria-pressed={speed === s.id}
+                                    aria-label={`Set speed to ${s.label}`}
+                                    className={`font-mono-jb uppercase text-[11px] tracking-widest px-3 py-2 border-r border-white/10 last:border-r-0 focus-ring-inset cursor-pointer ${
                                         speed === s.id
                                             ? "bg-[var(--status-info)] text-black"
                                             : "t-sec hover:bg-white/5"
