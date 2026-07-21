@@ -71,6 +71,7 @@ export default function Debrief({ state, onNewGame, onNextDay, nextDayBusy }) {
                     <Stat label="LHR CURFEW" value={k.curfew_violations || 0} tone={!k.curfew_violations ? "t-nominal" : "t-crit"} />
                     <Stat label="FATIGUE INDEX" value={k.fatigue_index} tone={k.fatigue_index < 40 ? "t-nominal" : k.fatigue_index < 70 ? "t-warn" : "t-crit"} />
                     <Stat label="OPS COST USD" value={`$${k.cost_usd.toLocaleString()}`} tone="t-warn" />
+                    <Stat label="EU261 COMP" value={`$${(k.compensation_usd || 0).toLocaleString()}`} tone={!k.compensation_usd ? "t-nominal" : "t-crit"} />
                     <Stat label="PAX DISRUPTED" value={k.pax_disrupted} tone="t-warn" />
                     <Stat label="CANCELLATIONS" value={cancellations} tone={cancellations === 0 ? "t-nominal" : "t-crit"} />
                 </div>

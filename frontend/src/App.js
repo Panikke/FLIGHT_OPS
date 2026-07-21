@@ -69,11 +69,17 @@ function App() {
         try {
             const res = await api.tick(state.id, minutes);
             await refresh();
-            if (res.new_incidents && res.new_incidents.length > 0) {
-                setToast(`▶ ${res.new_incidents.length} new incident(s) at ${res.clock.slice(11, 16)}Z`);
-                setPlaying(false); // auto-pause on new incident
-                setView("incidents");
-            }
+            // A real OCC doesn't freeze the clock for every disruption —
+            // the sim keeps running; toasts + the INCIDENTS nav badge are the
+            // signal, not a forced pause/view-switch. Ignoring an incident has
+            // its own cost: it escalates (severity major, extra delay).
+            const parts = [];
+            if (res.new_incidents?.length) parts.push(`${res.new_incidents.length} new incident(s)`);
+            if (res.escalations?.length)
+                parts.push(`⚠ ${res.escalations.map((e) => `${e.incident_id} ESCALATED (${e.flight_callsign} +${e.added_min}m)`).join(", ")}`);
+            if (res.compensation_events?.length)
+                parts.push(`💷 EU261 comp due: ${res.compensation_events.map((c) => `${c.callsign} $${c.amount_usd.toLocaleString()}`).join(", ")}`);
+            if (parts.length) setToast(`▶ ${parts.join(" · ")} at ${res.clock.slice(11, 16)}Z`);
         } catch (e) {
             setPlaying(false);
             setToast(`⚠ TICK FAILED: ${e?.message || "backend error"} — auto-paused`);
@@ -105,13 +111,6 @@ function App() {
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [playing, speed, state?.phase, state?.id]);
-
-    // Stop playing whenever there are open incidents (forces operator decision)
-    useEffect(() => {
-        if (!state) return;
-        const openCount = state.incidents.filter((i) => i.status === "open").length;
-        if (openCount > 0 && playing) setPlaying(false);
-    }, [state, playing]);
 
     async function resolveIncident(iid, action) {
         const res = await api.resolve(state.id, iid, action);
