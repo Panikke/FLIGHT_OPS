@@ -160,13 +160,14 @@ export default function FlightTimeline({ state }) {
                                                     key={f.id}
                                                     className={`absolute top-2 h-10 border-l-2 ${flightTone(f)} px-2 py-1 font-mono-jb text-[11px] overflow-hidden`}
                                                     style={{ left, width }}
-                                                    title={`${f.callsign} ${f.origin}-${f.destination} STD ${f.std.slice(11, 16)} status=${f.status} dly=${delay}${f.reactionary_min ? ` (knock-on ${f.reactionary_min}m: ${f.note || "inbound late"})` : ""}`}
+                                                    title={`${f.callsign} ${f.origin}-${f.destination} STD ${f.std.slice(11, 16)} status=${f.status} dly=${delay}${f.reactionary_min ? ` (knock-on ${f.reactionary_min}m: ${f.note || "inbound late"})` : ""}${f.curfew_violation ? ` [LHR CURFEW ${f.curfew_violation}]` : ""}`}
                                                     data-testid={`block-${f.callsign}`}
                                                 >
                                                     <div className="leading-tight flex items-center gap-1">
                                                         <span className="t-info">{f.callsign}</span>
                                                         <span>{f.origin}→{f.destination}</span>
                                                         {lbl && <span className="t-warn">{lbl}</span>}
+                                                        {f.curfew_violation && <span className="t-crit">CURFEW</span>}
                                                     </div>
                                                     <div className="t-muted">
                                                         {f.std.slice(11, 16)}{delay > 0 ? ` (+${delay})` : ""}

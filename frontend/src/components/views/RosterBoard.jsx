@@ -197,6 +197,15 @@ export default function RosterBoard({ state, onOpenAssign, onStartDay, onUnassig
                                                 KNOCK-ON +{f.reactionary_min}M
                                             </div>
                                         )}
+                                        {f.curfew_violation && (
+                                            <div
+                                                className="uppercase-wide t-crit mt-0.5"
+                                                title="LHR night curfew: movements 23:00-06:00Z draw a regulatory fine"
+                                                data-testid={`curfew-${f.callsign}`}
+                                            >
+                                                CURFEW ({f.curfew_violation})
+                                            </div>
+                                        )}
                                     </td>
                                     <td className="px-3 py-2 text-right">
                                         <button

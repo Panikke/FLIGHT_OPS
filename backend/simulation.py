@@ -7,6 +7,7 @@ It is NOT an official compliance tool.
 """
 
 from __future__ import annotations
+import math
 import random
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -76,6 +77,13 @@ MAX_DUTY_7D_HR = 60
 MAX_DUTY_7D_MIN = MAX_DUTY_7D_HR * 60
 MIN_TURNAROUND_MIN = 45          # minimum ground time before the same tail departs again
 DIVERSION_RECOVERY_MIN = 120     # extra positioning time after a diversion before next sector
+# LHR night curfew (simplified, inspired by real EGLL noise-abatement rules):
+# movements at the hub between 23:00Z and 06:00Z draw a regulatory fine.
+CURFEW_AIRPORT = "LHR"
+CURFEW_START_HOUR = 23
+CURFEW_END_HOUR = 6
+CURFEW_FINE_BASE_USD = 6000
+CURFEW_FINE_PER_PAX_USD = 8
 # Recurrent days free of duty: crew may not operate beyond this many consecutive
 # duty days without a day off; a warning is raised the day before the limit.
 MAX_CONSECUTIVE_DUTY_DAYS = 6
@@ -126,63 +134,116 @@ def _seed_duty_history(days_since_off: int, length: int = 6) -> list[str]:
     return hist[-length:]
 
 
+RANK_TITLES = {"CP": "Captain", "FO": "First Officer", "SC": "Senior Cabin", "CC": "Cabin Crew"}
+AIRCRAFT_TYPES_LIST = ["A320", "A350", "B777"]
+# Headroom over expected daily slot demand: real crew bases run well beyond
+# one day's minimum flying requirement to absorb standby, sickness, days-off
+# and training — this is what keeps "start the day fully rostered" achievable
+# without making disruption during ops toothless.
+CREW_SUPPLY_BUFFER = 1.3
+
+
+def _expected_daily_crew_demand() -> dict[tuple[str, str], float]:
+    """Expected crew-slot demand per (rank, type), derived from the fleet and
+    route-generation rules (not sampled from one game's random flights, so it
+    stays stable across every day of a campaign). A320 rotation count and
+    long-haul route/augmentation are both randomised per aircraft per day —
+    this averages over those distributions rather than assuming worst case,
+    which would wildly over-provision the crew pool."""
+    demand: dict[tuple[str, str], float] = {}
+
+    def add(rank: str, t: str, n: float) -> None:
+        demand[(rank, t)] = demand.get((rank, t), 0.0) + n
+
+    a320_count = sum(1 for ac in FLEET if ac["type"] == "A320")
+    if a320_count:
+        avg_rotations = sum(range(2, 4)) / len(range(2, 4))  # random.choice([2, 3])
+        add("CP", "A320", a320_count * avg_rotations)
+        add("FO", "A320", a320_count * avg_rotations)
+        add("SC", "A320", a320_count * avg_rotations)
+        add("CC", "A320", a320_count * avg_rotations * 3)
+
+    for t in ("A350", "B777"):
+        fleet_count = sum(1 for ac in FLEET if ac["type"] == t)
+        choices = [r for r in ROUTES_LONG if r[3] == t]
+        if not fleet_count or not choices:
+            continue
+        avg_augmented = sum(1 for r in choices if r[2] > 540) / len(choices)
+        avg_cp = 1 + avg_augmented  # 1 CP normally, 2 if augmented
+        cc = 7 if t == "B777" else 6
+        add("CP", t, fleet_count * avg_cp)
+        add("FO", t, fleet_count * 2)
+        add("SC", t, fleet_count * 1)
+        add("CC", t, fleet_count * cc)
+
+    return demand
+
+
+def _make_crew(rank: str, quals: list[str], cid: int, used_names: set[str]) -> dict:
+    for _try in range(50):
+        surname = random.choice(CREW_NAMES)
+        initial = random.choice("ABCDEFGHJKLMNPRSTW")
+        disp = f"{initial}. {surname}"
+        if disp not in used_names:
+            used_names.add(disp)
+            break
+    dso = random.randint(0, 5)
+    return {
+        "id": f"EGW{cid}",
+        "name": disp,
+        "rank": rank,
+        "rank_title": RANK_TITLES[rank],
+        "base": "LHR",
+        "qualifications": quals,
+        # Operating state
+        "fdp_used_min": 0,
+        "block_28d_hr": round(random.uniform(20, 70), 1),
+        "duty_7d_hr": round(random.uniform(10, 35), 1),
+        "rest_hr_since_duty": round(random.uniform(11, 30), 1),
+        "status": "available",        # available | on_duty | rest | standby | sick | off
+        "assigned_flight_id": None,
+        "fatigue_score": random.randint(15, 45),  # 0-100 lower better
+        "sickness_risk": round(random.uniform(0.01, 0.08), 3),
+        # ---- Days-off / roster-line tracking ----
+        # consecutive duty days since the crew's last day free of duty
+        "days_since_off": dso,
+        # per-completed-day duty codes (oldest->newest), grows each day
+        "duty_history": _seed_duty_history(dso),
+        # absolute future day_numbers the controller has pre-marked OFF
+        "days_off_planned": [],
+    }
+
+
 def _generate_crew() -> list[dict]:
-    ranks = [
-        ("CP", "Captain", 14, "flight_deck"),
-        ("FO", "First Officer", 22, "flight_deck"),
-        ("SC", "Senior Cabin", 18, "cabin"),
-        ("CC", "Cabin Crew", 60, "cabin"),
-    ]
-    crew = []
-    cid = 1000
+    crew: list[dict] = []
     used_names: set[str] = set()
-    for code, title, count, _crew_group in ranks:
-        for _ in range(count):
-            # surname + initial unique
-            for _try in range(50):
-                surname = random.choice(CREW_NAMES)
-                initial = random.choice("ABCDEFGHJKLMNPRSTW")
-                disp = f"{initial}. {surname}"
-                if disp not in used_names:
-                    used_names.add(disp)
-                    break
-            # Qualifications: flight deck almost always single-rated;
-            # cabin crew often dual-rated short/long
-            if code in ("CP", "FO"):
-                quals = [random.choice(["A320", "A350", "B777"])]
-                if random.random() < 0.15:
-                    second = random.choice([t for t in ["A320", "A350", "B777"] if t != quals[0]])
-                    quals.append(second)
-            else:
-                if random.random() < 0.55:
-                    quals = ["A320"]
-                else:
-                    quals = random.choice([["A350"], ["B777"], ["A320", "A350"], ["A320", "B777"]])
-            crew.append({
-                "id": f"EGW{cid}",
-                "name": disp,
-                "rank": code,
-                "rank_title": title,
-                "base": "LHR",
-                "qualifications": quals,
-                # Operating state
-                "fdp_used_min": 0,
-                "block_28d_hr": round(random.uniform(20, 70), 1),
-                "duty_7d_hr": round(random.uniform(10, 35), 1),
-                "rest_hr_since_duty": round(random.uniform(11, 30), 1),
-                "status": "available",        # available | on_duty | rest | standby | sick | off
-                "assigned_flight_id": None,
-                "fatigue_score": random.randint(15, 45),  # 0-100 lower better
-                "sickness_risk": round(random.uniform(0.01, 0.08), 3),
-                # ---- Days-off / roster-line tracking ----
-                # consecutive duty days since the crew's last day free of duty
-                "days_since_off": (_dso := random.randint(0, 5)),
-                # per-completed-day duty codes (oldest->newest), grows each day
-                "duty_history": _seed_duty_history(_dso),
-                # absolute future day_numbers the controller has pre-marked OFF
-                "days_off_planned": [],
-            })
-            cid += 1
+    cid = 1000
+
+    def spawn(rank: str, quals: list[str]) -> None:
+        nonlocal cid
+        crew.append(_make_crew(rank, quals, cid, used_names))
+        cid += 1
+
+    # 1. Guaranteed floor: single-type-qualified crew sized off expected daily
+    # demand per (rank, type), with buffer — guarantees the fleet's actual
+    # workload is coverable by rank AND by type-rating, not just in aggregate.
+    for (rank, t), qty in _expected_daily_crew_demand().items():
+        for _ in range(math.ceil(qty * CREW_SUPPLY_BUFFER)):
+            spawn(rank, [t])
+
+    # 2. Extra variety pool: dual/tri-rated crew for flavour and additional
+    # standby depth beyond the guaranteed floor. Flight deck are rarely
+    # multi-rated in reality; cabin crew commonly are.
+    extras = {"CP": 3, "FO": 5, "SC": 4, "CC": 8}
+    for rank, n in extras.items():
+        for _ in range(n):
+            primary = random.choice(AIRCRAFT_TYPES_LIST)
+            quals = [primary]
+            dual_chance = 0.15 if rank in ("CP", "FO") else 0.5
+            if random.random() < dual_chance:
+                quals.append(random.choice([t for t in AIRCRAFT_TYPES_LIST if t != primary]))
+            spawn(rank, quals)
+
     return crew
 
 
@@ -323,6 +384,7 @@ def new_game(scenario: str = "free_play") -> dict:
         "kpis": {
             "otp_pct": 100.0,
             "legality_breaches": 0,
+            "curfew_violations": 0,
             "fatigue_index": 25,
             "cost_usd": 0,
             "pax_delay_min": 0,
@@ -467,6 +529,16 @@ def advance_to_next_day(state: dict) -> dict:
             c["days_since_off"] = 0
         else:
             c["days_since_off"] = c.get("days_since_off", 0) + 1
+            # Auto-plan tomorrow off once the consecutive-duty cap is reached.
+            # Real crew-rostering software bakes legal rest days into the
+            # baseline roster line rather than leaving compliance to be
+            # remembered manually — the controller can still override via
+            # the Days-Off calendar (set_day_off) if operational need demands
+            # it, same as commander's/rostering discretion in practice.
+            if c["days_since_off"] >= MAX_CONSECUTIVE_DUTY_DAYS:
+                planned = c.setdefault("days_off_planned", [])
+                if incoming_day not in planned:
+                    planned.append(incoming_day)
 
         c.setdefault("block_history", [])
         c["block_history"].append(flown)
@@ -474,6 +546,13 @@ def advance_to_next_day(state: dict) -> dict:
         if len(c["block_history"]) > 28:
             c["block_history"] = c["block_history"][-28:]
         c["block_28d_hr"] = round(sum(c["block_history"]), 1)
+        # duty_7d_hr must be a ROLLING 7-day sum, not a running total — it's
+        # incremented intraday in tick() as flights land (so same-day legality
+        # checks see hours flown so far today), but nothing was ever rolling
+        # the oldest day back out. Left unfixed, every active crew member
+        # marches past the 60h/7-day cap by day 3-4 and never returns,
+        # collapsing roster feasibility for the rest of the campaign.
+        c["duty_7d_hr"] = round(sum(c["block_history"][-7:]), 2)
         c["fdp_used_min"] = 0
         # Fatigue update — a day off recovers more than an idle reserve day
         if flown > 0:
@@ -548,6 +627,7 @@ def advance_to_next_day(state: dict) -> dict:
     state["kpis"] = {
         "otp_pct": 100.0,
         "legality_breaches": 0,
+        "curfew_violations": 0,
         "fatigue_index": int(sum(c["fatigue_score"] for c in state["crew"]) / max(1, len(state["crew"]))),
         "cost_usd": 0,
         "pax_delay_min": 0,
@@ -1114,6 +1194,31 @@ SURVIVE_7_CURVE = {
 }
 
 
+def _in_curfew_window(dt: datetime) -> bool:
+    """True if `dt` (any timezone-aware instant, compared by its hour) falls
+    inside the LHR night curfew window, which wraps midnight."""
+    h = dt.hour
+    return h >= CURFEW_START_HOUR or h < CURFEW_END_HOUR
+
+
+def _apply_curfew_violation(state: dict, flight: dict, kind: str) -> dict:
+    """Record a curfew breach on `flight` (kind: 'departure' | 'arrival'),
+    fine the operation, and return the violation record for the caller."""
+    fine = CURFEW_FINE_BASE_USD + flight.get("pax_count", 0) * CURFEW_FINE_PER_PAX_USD
+    state["kpis"]["curfew_violations"] = state["kpis"].get("curfew_violations", 0) + 1
+    state["kpis"]["cost_usd"] += fine
+    tag = f"LHR NIGHT CURFEW ({kind})"
+    note = flight.get("note") or ""
+    flight["note"] = f"{note} · {tag}" if note else tag
+    flight["curfew_violation"] = kind
+    return {
+        "flight_id": flight["id"],
+        "callsign": flight["callsign"],
+        "kind": kind,
+        "fine_usd": fine,
+    }
+
+
 def tick(state: dict, minutes: int = 30) -> dict:
     """Advance the simulation clock by `minutes`. May spawn incidents."""
     if state["phase"] != "OPS":
@@ -1123,12 +1228,27 @@ def tick(state: dict, minutes: int = 30) -> dict:
     state["clock"] = clock.isoformat()
 
     # ---- Flight lifecycle progression ----
+    curfew_violations = []
     for f in state["flights"]:
         if f["status"] in ("cancelled", "diverted", "landed"):
             continue
         delay = f.get("delay_min", 0)
         std_dt = datetime.fromisoformat(f["std"]) + timedelta(minutes=delay)
         sta_dt = datetime.fromisoformat(f["sta"]) + timedelta(minutes=delay)
+
+        # Curfew is checked once, at the first tick the effective time is
+        # crossed — decoupled from the status label so a delay-inflated
+        # departure/arrival still gets caught even if status stalls at
+        # "boarding" rather than flipping to "airborne".
+        if clock >= std_dt and not f.get("curfew_dep_checked"):
+            f["curfew_dep_checked"] = True
+            if f["origin"] == CURFEW_AIRPORT and _in_curfew_window(std_dt):
+                curfew_violations.append(_apply_curfew_violation(state, f, "departure"))
+        if clock >= sta_dt and not f.get("curfew_arr_checked"):
+            f["curfew_arr_checked"] = True
+            if f["destination"] == CURFEW_AIRPORT and _in_curfew_window(sta_dt):
+                curfew_violations.append(_apply_curfew_violation(state, f, "arrival"))
+
         if clock >= sta_dt:
             prev = f["status"]
             f["status"] = "landed"
@@ -1233,6 +1353,7 @@ def tick(state: dict, minutes: int = 30) -> dict:
         "ok": True,
         "new_incidents": new_incidents,
         "reactionary_delays": reactionary,
+        "curfew_violations": curfew_violations,
         "clock": state["clock"],
     }
 
@@ -1600,6 +1721,7 @@ def restart_day(state: dict) -> dict:
     state["kpis"] = {
         "otp_pct": 100.0,
         "legality_breaches": 0,
+        "curfew_violations": 0,
         "fatigue_index": int(sum(c["fatigue_score"] for c in state["crew"]) / max(1, len(state["crew"]))),
         "cost_usd": 0,
         "pax_delay_min": 0,
