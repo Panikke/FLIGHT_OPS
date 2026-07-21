@@ -69,19 +69,31 @@ def test_roster_status(session, game):
     assert j["total"] == len(game["flights"])
 
 
-def _pick_flight_and_crews(state):
-    """Return (flight, valid_crew_id, invalid_qual_crew_id) for assignment tests."""
+def _pick_flight_and_crews(session, state):
+    """Return (flight, valid_crew_id, invalid_qual_crew_id) for assignment tests.
+    `valid` is verified live via /check_assignment rather than just matching
+    rank+qualification — crew rest hours are randomised per game (11-30h vs a
+    12h minimum), so a rank+qual match alone isn't guaranteed to be legal."""
+    game_id = state["id"]
     flight = state["flights"][0]
     type_q = flight["required_crew"]["type_qual"]
-    valid = next(c for c in state["crew"] if c["rank"] == "CP" and type_q in c["qualifications"]
-                 and c["status"] in ("available", "standby"))
+    candidates = [c for c in state["crew"] if c["rank"] == "CP" and type_q in c["qualifications"]
+                  and c["status"] in ("available", "standby")]
+    valid = None
+    for c in candidates:
+        r = session.post(f"{API}/sim/{game_id}/check_assignment/{flight['id']}",
+                          json={"crew_id": c["id"]}, timeout=15)
+        if r.status_code == 200 and not r.json().get("has_critical"):
+            valid = c
+            break
+    assert valid is not None, "no legal CP candidate found for the assign-flow tests"
     invalid = next(c for c in state["crew"] if c["rank"] == "CP" and type_q not in c["qualifications"])
     return flight, valid["id"], invalid["id"]
 
 
 # ---- 5. check_assignment ----
 def test_check_assignment(session, game):
-    flight, valid_id, invalid_id = _pick_flight_and_crews(game)
+    flight, valid_id, invalid_id = _pick_flight_and_crews(session, game)
     r = session.post(f"{API}/sim/{game['id']}/check_assignment/{flight['id']}",
                      json={"crew_id": invalid_id}, timeout=15)
     assert r.status_code == 200
@@ -93,7 +105,7 @@ def test_check_assignment(session, game):
 
 # ---- 6. assign valid + invalid + force ----
 def test_assign_flow(session, game):
-    flight, valid_id, invalid_id = _pick_flight_and_crews(game)
+    flight, valid_id, invalid_id = _pick_flight_and_crews(session, game)
     # valid
     r = session.post(f"{API}/sim/{game['id']}/assign/{flight['id']}",
                      json={"crew_id": valid_id}, timeout=15)

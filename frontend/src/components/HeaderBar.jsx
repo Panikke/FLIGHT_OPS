@@ -57,7 +57,13 @@ export default function HeaderBar({
 
             <Kpi label="ZULU CLOCK" value={fmtClock(state.clock)} sub={playing ? `▶ PLAY ${["", "1×", "2×", "5×", "15×"][speed] || ""}` : state.phase === "OPS" ? "PAUSED" : ""} tone="info" testid="kpi-clock" />
             <Kpi label="OTP%" value={`${k.otp_pct.toFixed(0)}`} sub="ON-TIME PERFORMANCE" tone={otpTone} testid="kpi-otp" />
-            <Kpi label="BREACHES" value={k.legality_breaches} sub="LEGALITY" tone={breachTone} testid="kpi-breach" />
+            <Kpi
+                label="BREACHES"
+                value={k.legality_breaches}
+                sub={k.curfew_violations > 0 ? `LEGALITY · ${k.curfew_violations} CURFEW` : "LEGALITY"}
+                tone={breachTone}
+                testid="kpi-breach"
+            />
             <Kpi label="FATIGUE IDX" value={k.fatigue_index} sub="FLEET AVG" tone={fatigueTone} testid="kpi-fatigue" />
             <Kpi label="COST USD" value={`${(k.cost_usd / 1000).toFixed(1)}k`} sub="OPS COST" tone="warn" testid="kpi-cost" />
             <Kpi label="PAX DISR." value={k.pax_disrupted} sub="PASSENGERS" tone="warn" testid="kpi-pax" />

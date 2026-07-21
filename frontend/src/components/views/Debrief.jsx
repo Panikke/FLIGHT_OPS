@@ -65,9 +65,10 @@ export default function Debrief({ state, onNewGame, onNextDay, nextDayBusy }) {
                     <div className="label-key mt-6">DAY SCORE</div>
                     <div className="kpi-num text-5xl mt-1">{k.score}</div>
                 </div>
-                <div className="col-span-8 panel p-6 grid grid-cols-3 gap-4">
+                <div className="col-span-8 panel p-6 grid grid-cols-4 gap-4">
                     <Stat label="OTP %" value={`${k.otp_pct.toFixed(1)}%`} tone={k.otp_pct >= 85 ? "t-nominal" : k.otp_pct >= 70 ? "t-warn" : "t-crit"} />
                     <Stat label="LEGALITY BREACHES" value={k.legality_breaches} tone={k.legality_breaches === 0 ? "t-nominal" : "t-crit"} />
+                    <Stat label="LHR CURFEW" value={k.curfew_violations || 0} tone={!k.curfew_violations ? "t-nominal" : "t-crit"} />
                     <Stat label="FATIGUE INDEX" value={k.fatigue_index} tone={k.fatigue_index < 40 ? "t-nominal" : k.fatigue_index < 70 ? "t-warn" : "t-crit"} />
                     <Stat label="OPS COST USD" value={`$${k.cost_usd.toLocaleString()}`} tone="t-warn" />
                     <Stat label="PAX DISRUPTED" value={k.pax_disrupted} tone="t-warn" />
