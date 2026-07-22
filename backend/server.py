@@ -54,6 +54,10 @@ class DayOffReq(BaseModel):
     off: bool = True
 
 
+class AircraftReq(BaseModel):
+    reg: str
+
+
 # ---------------- DB helpers ---------------- #
 async def _load(game_id: str) -> dict:
     doc = await db.games.find_one({"id": game_id}, {"_id": 0})
@@ -106,6 +110,34 @@ async def set_day_off(game_id: str, crew_id: str, body: DayOffReq):
     state = await _load(game_id)
     result = sim.set_day_off(state, crew_id, body.day, off=body.off)
     if result.get("ok"):
+        await _save(state)
+    return result
+
+
+@api_router.get("/sim/{game_id}/aircraft_control")
+async def aircraft_control(game_id: str):
+    state = await _load(game_id)
+    return sim.aircraft_control(state)
+
+
+@api_router.post("/sim/{game_id}/check_aircraft/{pairing_id}")
+async def check_aircraft(game_id: str, pairing_id: str, body: AircraftReq):
+    state = await _load(game_id)
+    warnings = sim.check_aircraft_assignment(state, pairing_id, body.reg)
+    return {"warnings": warnings, "has_critical": any(w["severity"] == "critical" for w in warnings)}
+
+
+@api_router.post("/sim/{game_id}/assign_aircraft/{pairing_id}")
+async def assign_aircraft(game_id: str, pairing_id: str, body: AircraftReq):
+    state = await _load(game_id)
+    result = sim.assign_aircraft(state, pairing_id, body.reg)
+    if result.get("applied"):
+        # A re-tail during ops can change the knock-on delay picture (the tail's
+        # rotation membership changed), so re-propagate and re-score.
+        if state.get("phase") == "OPS":
+            result["reactionary_delays"] = sim.propagate_reactionary_delays(state)
+            sim._recompute_kpis(state)
+            result["kpis"] = state["kpis"]
         await _save(state)
     return result
 

@@ -30,7 +30,10 @@ AIRCRAFT_TYPES = {
     "B777": {"seats": 350, "haul": "long", "max_block_hr": 15, "crew_rest_class": "class_1"},
 }
 
-# Fleet: tail registrations
+# Fleet: tail registrations. Tails flagged `spare` start the day on the ground
+# with no scheduled flying — they are the fleet controller's reserve, available
+# to swap onto a rotation (via the Aircraft Control desk) or to cover a tech
+# aircraft. Non-spare tails each fly a generated set of rotations.
 FLEET = [
     {"reg": "G-EAGA", "type": "A320"},
     {"reg": "G-EAGB", "type": "A320"},
@@ -40,6 +43,10 @@ FLEET = [
     {"reg": "G-EAGM", "type": "A350"},
     {"reg": "G-EAGN", "type": "B777"},
     {"reg": "G-EAGO", "type": "B777"},
+    # Reserve aircraft (one per family) — on stand, ready to be assigned.
+    {"reg": "G-EAGE", "type": "A320", "spare": True},
+    {"reg": "G-EAGP", "type": "A350", "spare": True},
+    {"reg": "G-EAGQ", "type": "B777", "spare": True},
 ]
 
 # Routes: (origin, destination, block_minutes, type_pref)
@@ -160,7 +167,9 @@ def _expected_daily_crew_demand() -> dict[tuple[str, str], float]:
     def add(rank: str, t: str, n: float) -> None:
         demand[(rank, t)] = demand.get((rank, t), 0.0) + n
 
-    a320_count = sum(1 for ac in FLEET if ac["type"] == "A320")
+    # Spare tails don't fly a scheduled programme, so they generate no crew
+    # demand — count only the active (non-spare) fleet.
+    a320_count = sum(1 for ac in FLEET if ac["type"] == "A320" and not ac.get("spare"))
     if a320_count:
         avg_rotations = sum(range(2, 4)) / len(range(2, 4))  # random.choice([2, 3])
         req = _required_crew_for("A320", 0)  # block length doesn't affect A320 composition
@@ -168,7 +177,7 @@ def _expected_daily_crew_demand() -> dict[tuple[str, str], float]:
             add(rank, "A320", a320_count * avg_rotations * req[rank])
 
     for t in ("A350", "B777"):
-        fleet_count = sum(1 for ac in FLEET if ac["type"] == t)
+        fleet_count = sum(1 for ac in FLEET if ac["type"] == t and not ac.get("spare"))
         choices = [r for r in ROUTES_LONG if r[3] == t]
         if not fleet_count or not choices:
             continue
@@ -267,6 +276,8 @@ def _generate_day_flights(day_start_iso: str) -> list[dict]:
     day_start = datetime.fromisoformat(day_start_iso)
     fnum = 100
     for ac in FLEET:
+        if ac.get("spare"):
+            continue  # reserve tail — starts the day idle on stand
         depart_min = random.randint(0, 180)
         if ac["type"] == "A320":
             # 2 to 3 out-and-back rotations in the day, each = 1 pairing
@@ -1183,6 +1194,208 @@ def auto_roster(state: dict) -> dict:
         "assigned": assigned_total,
         "skipped": skipped_total,
         "flights_touched": flights_touched,
+    }
+
+
+# ------------------- Aircraft (fleet) control ------------------- #
+# The real-world "Aircraft Movement Control" desk: which tail flies which
+# rotation. A rotation is a pairing (all sectors sharing a pairing_id — an
+# out-and-back for short-haul, a single sector for long-haul). Every sector of
+# a pairing is always operated by the SAME tail, so assignment happens at the
+# pairing level, mirroring how crew are rostered per pairing.
+
+_AC_ACTIVE_STATUSES = ("scheduled", "delayed", "boarding")
+
+
+def _pairing_sectors(state: dict, pairing_id: str) -> list[dict]:
+    """All sector flights of a pairing, in schedule order."""
+    return sorted(
+        (f for f in state["flights"] if f.get("pairing_id") == pairing_id),
+        key=lambda f: f["std"],
+    )
+
+
+def _pairing_window(sectors: list[dict]) -> tuple[datetime, datetime]:
+    """(earliest effective departure, latest effective arrival) for a pairing,
+    including any delay already applied — the ground-to-ground span the tail is
+    committed for."""
+    first = min(datetime.fromisoformat(s["std"]) + timedelta(minutes=s.get("delay_min", 0))
+                for s in sectors)
+    last = max(datetime.fromisoformat(s["sta"]) + timedelta(minutes=s.get("delay_min", 0))
+               for s in sectors)
+    return first, last
+
+
+def _pairing_route_label(sectors: list[dict]) -> str:
+    """Human route summary, e.g. 'LHR-BCN-LHR' or 'LHR-SIN'."""
+    stops = [sectors[0]["origin"]] + [s["destination"] for s in sectors]
+    return "-".join(stops)
+
+
+def check_aircraft_assignment(state: dict, pairing_id: str, reg: str) -> list[dict]:
+    """Legality of putting tail `reg` on a pairing. Aircraft constraints are
+    HARD (a physical aircraft cannot be the wrong type, be in two places, or
+    un-fly a sector already underway) — there is no override, unlike crew."""
+    warnings: list[dict] = []
+    sectors = _pairing_sectors(state, pairing_id)
+    ac = next((a for a in state.get("fleet", FLEET) if a["reg"] == reg), None)
+    if not sectors or not ac:
+        return [{
+            "code": "REF_NOT_FOUND", "severity": "critical",
+            "message": "Aircraft or rotation reference not found.", "rule_ref": "INTERNAL",
+        }]
+
+    pairing_type = sectors[0]["aircraft_type"]
+    if ac["type"] != pairing_type:
+        warnings.append({
+            "code": "AC_TYPE_MISMATCH", "severity": "critical",
+            "message": (
+                f"{reg} is a {ac['type']}; this rotation needs a {pairing_type}. "
+                f"Crew type-ratings and gate/route planning are type-specific."
+            ),
+            "rule_ref": "Fleet / type compatibility",
+        })
+
+    # A sector already underway or finished can't be re-tailed.
+    departed = [s for s in sectors if s["status"] not in _AC_ACTIVE_STATUSES]
+    if departed:
+        warnings.append({
+            "code": "AC_DEPARTED", "severity": "critical",
+            "message": (
+                f"{departed[0]['callsign']} is already {departed[0]['status']} — "
+                f"the rotation is underway and cannot be reassigned to another tail."
+            ),
+            "rule_ref": "Operational — sector in progress",
+        })
+
+    # Double-booking: the tail can't be committed to an overlapping rotation.
+    if ac["type"] == pairing_type:
+        win_start, win_end = _pairing_window(sectors)
+        turn = timedelta(minutes=MIN_TURNAROUND_MIN)
+        other_pairings: dict[str, list[dict]] = {}
+        for f in state["flights"]:
+            opid = f.get("pairing_id")
+            if opid and opid != pairing_id and f["aircraft_reg"] == reg \
+                    and f["status"] != "cancelled":
+                other_pairings.setdefault(opid, []).append(f)
+        for opid, osecs in other_pairings.items():
+            o_start, o_end = _pairing_window(osecs)
+            # Conflict unless one finishes (+turnaround) before the other starts.
+            if not (win_end + turn <= o_start or o_end + turn <= win_start):
+                osecs_sorted = sorted(osecs, key=lambda f: f["std"])
+                warnings.append({
+                    "code": "AC_OVERLAP", "severity": "critical",
+                    "message": (
+                        f"{reg} is already committed to {osecs_sorted[0]['callsign']} "
+                        f"({_pairing_route_label(osecs_sorted)}), which overlaps this "
+                        f"rotation's ground-time (min {MIN_TURNAROUND_MIN}min turnaround)."
+                    ),
+                    "rule_ref": "Operational — aircraft double-booking",
+                })
+                break
+    return warnings
+
+
+def assign_aircraft(state: dict, pairing_id: str, reg: str) -> dict:
+    """Assign tail `reg` to every sector of a pairing. Hard constraints only —
+    a critical warning blocks the change (no force path)."""
+    warnings = check_aircraft_assignment(state, pairing_id, reg)
+    if any(w["severity"] == "critical" for w in warnings):
+        return {"ok": False, "applied": False, "warnings": warnings,
+                "pairing_id": pairing_id, "reg": reg}
+
+    sectors = _pairing_sectors(state, pairing_id)
+    previous = sectors[0]["aircraft_reg"] if sectors else None
+    for s in sectors:
+        s["aircraft_reg"] = reg
+    return {
+        "ok": True, "applied": True, "warnings": warnings,
+        "pairing_id": pairing_id, "reg": reg, "previous_reg": previous,
+    }
+
+
+def aircraft_control(state: dict) -> dict:
+    """Fleet-control view: every tail with its rotations for the day, plus a
+    per-rotation list for the reassignment table."""
+    fleet = state.get("fleet", FLEET)
+
+    # Group flights into pairings once.
+    pairings: dict[str, list[dict]] = {}
+    for f in state["flights"]:
+        pid = f.get("pairing_id")
+        if pid:
+            pairings.setdefault(pid, []).append(f)
+    for pid in pairings:
+        pairings[pid].sort(key=lambda f: f["std"])
+
+    def _pairing_status(secs: list[dict]) -> str:
+        statuses = {s["status"] for s in secs}
+        if statuses <= {"cancelled"}:
+            return "cancelled"
+        if "airborne" in statuses:
+            return "airborne"
+        if all(s["status"] == "landed" for s in secs):
+            return "landed"
+        if "boarding" in statuses:
+            return "boarding"
+        if any(s.get("delay_min", 0) > 15 for s in secs):
+            return "delayed"
+        return "scheduled"
+
+    rotations = []
+    by_reg_rotations: dict[str, list[dict]] = {}
+    for pid, secs in pairings.items():
+        first, last = _pairing_window(secs)
+        rot = {
+            "pairing_id": pid,
+            "aircraft_reg": secs[0]["aircraft_reg"],
+            "aircraft_type": secs[0]["aircraft_type"],
+            "callsigns": [s["callsign"] for s in secs],
+            "route": _pairing_route_label(secs),
+            "sectors": len(secs),
+            "std": secs[0]["std"],
+            "sta": secs[-1]["sta"],
+            "first_dep": first.isoformat(),
+            "last_arr": last.isoformat(),
+            "block_min": sum(s["block_min"] for s in secs),
+            "pax": sum(s.get("pax_count", 0) for s in secs),
+            "status": _pairing_status(secs),
+            "reassignable": all(s["status"] in _AC_ACTIVE_STATUSES for s in secs),
+        }
+        rotations.append(rot)
+        by_reg_rotations.setdefault(secs[0]["aircraft_reg"], []).append(rot)
+    rotations.sort(key=lambda r: r["std"])
+
+    fleet_view = []
+    for ac in fleet:
+        rots = sorted(by_reg_rotations.get(ac["reg"], []), key=lambda r: r["std"])
+        block = sum(r["block_min"] for r in rots)
+        if not rots:
+            status = "spare" if ac.get("spare") else "idle"
+        elif all(r["status"] == "landed" for r in rots):
+            status = "day done"
+        elif any(r["status"] == "airborne" for r in rots):
+            status = "airborne"
+        elif any(r["status"] == "delayed" for r in rots):
+            status = "delayed"
+        else:
+            status = "in service"
+        fleet_view.append({
+            "reg": ac["reg"],
+            "type": ac["type"],
+            "spare": bool(ac.get("spare")),
+            "rotation_count": len(rots),
+            "sectors": sum(r["sectors"] for r in rots),
+            "block_min": block,
+            "block_hours": round(block / 60, 1),
+            "status": status,
+            "rotations": rots,
+        })
+
+    return {
+        "fleet": fleet_view,
+        "rotations": rotations,
+        "min_turnaround_min": MIN_TURNAROUND_MIN,
     }
 
 

@@ -30,4 +30,9 @@ export const api = {
     crewRoster: (gid) => client.get(`/sim/${gid}/crew_roster`).then((r) => r.data),
     setDayOff: (gid, crewId, day, off = true) =>
         client.post(`/sim/${gid}/crew/${crewId}/day_off`, { day, off }).then((r) => r.data),
+    aircraftControl: (gid) => client.get(`/sim/${gid}/aircraft_control`).then((r) => r.data),
+    checkAircraft: (gid, pairingId, reg) =>
+        client.post(`/sim/${gid}/check_aircraft/${pairingId}`, { reg }).then((r) => r.data),
+    assignAircraft: (gid, pairingId, reg) =>
+        client.post(`/sim/${gid}/assign_aircraft/${pairingId}`, { reg }).then((r) => r.data),
 };

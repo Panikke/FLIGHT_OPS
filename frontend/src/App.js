@@ -5,6 +5,7 @@ import BootScreen from "./components/BootScreen";
 import HeaderBar from "./components/HeaderBar";
 import Sidebar from "./components/Sidebar";
 import RosterBoard from "./components/views/RosterBoard";
+import AircraftControl from "./components/views/AircraftControl";
 import FlightTimeline from "./components/views/FlightTimeline";
 import IncidentQueue from "./components/views/IncidentQueue";
 import CrewPanel from "./components/views/CrewPanel";
@@ -258,6 +259,7 @@ function App() {
                             onAutoRoster={autoRoster}
                         />
                     )}
+                    {showView === "aircraft" && <AircraftControl state={state} onChanged={refresh} />}
                     {showView === "timeline" && <FlightTimeline state={state} />}
                     {showView === "incidents" && (
                         <IncidentQueue
