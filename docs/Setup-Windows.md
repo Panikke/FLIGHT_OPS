@@ -137,11 +137,20 @@ MONGO_URL="mongodb://localhost:27017"
 DB_NAME="egw_occ"
 CORS_ORIGINS="http://localhost:3000"
 ANTHROPIC_API_KEY=""
-'@ | Set-Content -Encoding utf8 backend\.env
+'@ | Set-Content -Encoding ascii backend\.env
 ```
 
 That's all you need to play. (Want the AI advisor? Add your key later — see
 [Configuration Reference](Configuration-Reference.md#the-ops-advisor-ai-key).)
+
+> **Why `-Encoding ascii` and not `utf8`?** In Windows PowerShell 5.1 (the
+> version that ships with Windows), `-Encoding utf8` writes a UTF-8 **byte
+> order mark** at the start of the file. Python's `.env` loader leaves that
+> BOM attached to the first key name, so the backend reads it as `﻿MONGO_URL`
+> instead of `MONGO_URL` and fails with `KeyError: 'MONGO_URL'` even though the
+> file looks correct. This config block is plain ASCII, so `-Encoding ascii`
+> sidesteps the BOM entirely. (If you're on PowerShell 7+, `-Encoding utf8NoBOM`
+> also works.)
 
 ---
 
