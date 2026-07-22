@@ -2,6 +2,7 @@ import React from "react";
 
 const NAV = [
     { id: "roster", label: "ROSTER" },
+    { id: "aircraft", label: "AIRCRAFT" },
     { id: "timeline", label: "TIMELINE" },
     { id: "incidents", label: "INCIDENTS" },
     { id: "crew", label: "CREW" },

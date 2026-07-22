@@ -46,7 +46,9 @@ def test_new_game_shape(game):
     assert game["phase"] == "ROSTER"
     assert len(game["crew"]) >= 100
     assert 15 <= len(game["flights"]) <= 40
-    assert len(game["fleet"]) == 8
+    # 8 active tails + 3 reserve/spare tails (one per family)
+    assert len(game["fleet"]) == 11
+    assert sum(1 for a in game["fleet"] if a.get("spare")) == 3
     assert "kpis" in game and "otp_pct" in game["kpis"]
     assert "_id" not in game
 
