@@ -702,6 +702,8 @@ def _generate_next_day_flights(day_start_iso: str, long_haul_returns: dict, crew
 
     # Short-haul: every A320 does new out-and-backs from LHR
     for ac in FLEET:
+        if ac.get("spare"):
+            continue  # reserve tail — stays idle unless the controller assigns it
         if ac["type"] != "A320":
             continue
         depart_min = random.randint(0, 180)
@@ -722,6 +724,8 @@ def _generate_next_day_flights(day_start_iso: str, long_haul_returns: dict, crew
 
     # Long-haul NEW outbounds: any LH aircraft NOT used for a return (i.e. it's at LHR)
     for ac in FLEET:
+        if ac.get("spare"):
+            continue  # reserve tail — stays idle unless the controller assigns it
         if ac["type"] == "A320":
             continue
         if ac["reg"] in long_haul_regs_used:
@@ -1232,6 +1236,30 @@ def _pairing_route_label(sectors: list[dict]) -> str:
     return "-".join(stops)
 
 
+def _aircraft_position_before(state: dict, reg: str, before_dt: datetime, exclude_pairing_id: str | None = None) -> str:
+    """Airport where tail `reg` is expected to be immediately before `before_dt`,
+    based on its OTHER scheduled flights today. A tail with no earlier flight
+    (a fresh spare, or this being its first sector of the day) is assumed to
+    start the day at the hub — matching how every generated rotation departs
+    from the hub, and how spares start the day parked there on stand."""
+    flights_for_reg = sorted(
+        (f for f in state["flights"]
+         if f.get("aircraft_reg") == reg and f["status"] != "cancelled"
+         and f.get("pairing_id") != exclude_pairing_id),
+        key=lambda f: f["std"],
+    )
+    if not flights_for_reg:
+        return AIRLINE["hub"]
+    completed = [
+        f for f in flights_for_reg
+        if datetime.fromisoformat(f["sta"]) + timedelta(minutes=f.get("delay_min", 0)) <= before_dt
+    ]
+    if completed:
+        completed.sort(key=lambda f: datetime.fromisoformat(f["sta"]) + timedelta(minutes=f.get("delay_min", 0)))
+        return completed[-1]["destination"]
+    return flights_for_reg[0]["origin"]
+
+
 def check_aircraft_assignment(state: dict, pairing_id: str, reg: str) -> list[dict]:
     """Legality of putting tail `reg` on a pairing. Aircraft constraints are
     HARD (a physical aircraft cannot be the wrong type, be in two places, or
@@ -1268,9 +1296,27 @@ def check_aircraft_assignment(state: dict, pairing_id: str, reg: str) -> list[di
             "rule_ref": "Operational — sector in progress",
         })
 
-    # Double-booking: the tail can't be committed to an overlapping rotation.
+    # Position + double-booking checks only make sense once the type matches.
     if ac["type"] == pairing_type:
         win_start, win_end = _pairing_window(sectors)
+
+        # Position: the tail must actually be at the rotation's departure
+        # station. An idle/spare tail sitting at the hub can't operate a
+        # rotation that departs from an outstation (e.g. a night-stopped
+        # long-haul aircraft's return leg).
+        pairing_origin = sectors[0]["origin"]
+        position = _aircraft_position_before(state, reg, win_start, exclude_pairing_id=pairing_id)
+        if position != pairing_origin:
+            warnings.append({
+                "code": "AC_WRONG_STATION", "severity": "critical",
+                "message": (
+                    f"{reg} is at {position}, not {pairing_origin} — it cannot operate "
+                    f"a rotation departing from a station it isn't at."
+                ),
+                "rule_ref": "Operational — aircraft position",
+            })
+
+        # Double-booking: the tail can't be committed to an overlapping rotation.
         turn = timedelta(minutes=MIN_TURNAROUND_MIN)
         other_pairings: dict[str, list[dict]] = {}
         for f in state["flights"]:
@@ -2002,15 +2048,40 @@ def resolve_incident(state: dict, incident_id: str, action: str) -> dict:
     }
 
 
+def reset_reactionary_delays(state: dict) -> None:
+    """Strip previously-applied reactionary delay back to its non-reactionary
+    baseline (whatever delay an incident etc. directly caused).
+
+    `propagate_reactionary_delays` only ever adds — it has no way to know a
+    knock-on it applied earlier is no longer warranted once its root cause is
+    gone. That happens when a tail is reassigned mid-OPS: the rotation that
+    picked up delay from a late inbound aircraft may now be flown by a
+    different, on-time tail. Call this before re-propagating after any change
+    to the aircraft-to-rotation mapping, so delay is rebuilt from scratch
+    rather than compounding on top of stale knock-on.
+    """
+    for f in state["flights"]:
+        extra = f.get("reactionary_min", 0)
+        if not extra:
+            continue
+        f["delay_min"] = max(0, f.get("delay_min", 0) - extra)
+        f["reactionary_min"] = 0
+        if (f.get("note") or "").startswith("REACTIONARY"):
+            f["note"] = ""
+        if f["status"] == "delayed" and f["delay_min"] <= 0:
+            f["status"] = "scheduled"
+
+
 def propagate_reactionary_delays(state: dict) -> list[dict]:
     """Roll knock-on (reactionary) delays down each aircraft's day.
 
     For every tail, walk its sectors in schedule order tracking when the
     aircraft is actually ready again (estimated arrival + minimum turnaround).
     Any later sector that would depart before its aircraft is ready picks up
-    the difference as reactionary delay. Re-running is safe: applied delay
-    feeds back into the effective departure time, so a sector is only pushed
-    further if its inbound slipped further since the last pass.
+    the difference as reactionary delay. Re-running only ever adds delay on
+    top of what's already applied — it cannot shrink a knock-on whose cause
+    has gone away (e.g. a tail swap). Call `reset_reactionary_delays` first
+    when the aircraft-to-rotation mapping has changed.
     """
     affected: list[dict] = []
     by_reg: dict[str, list[dict]] = {}

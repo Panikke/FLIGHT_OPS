@@ -133,8 +133,12 @@ async def assign_aircraft(game_id: str, pairing_id: str, body: AircraftReq):
     result = sim.assign_aircraft(state, pairing_id, body.reg)
     if result.get("applied"):
         # A re-tail during ops can change the knock-on delay picture (the tail's
-        # rotation membership changed), so re-propagate and re-score.
+        # rotation membership changed), so rebuild reactionary delay from its
+        # non-reactionary baseline before re-propagating and re-scoring — a
+        # stale knock-on from the old tail assignment must not survive the
+        # swap that removed its cause.
         if state.get("phase") == "OPS":
+            sim.reset_reactionary_delays(state)
             result["reactionary_delays"] = sim.propagate_reactionary_delays(state)
             sim._recompute_kpis(state)
             result["kpis"] = state["kpis"]

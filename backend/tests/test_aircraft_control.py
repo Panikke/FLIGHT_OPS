@@ -20,14 +20,15 @@ def _no_random_spawns(monkeypatch):
     monkeypatch.setattr(sim, "BASE_INCIDENT_RATE_PER_HOUR", 0)
 
 
-def _flight(callsign, reg, ac_type, std, block_min, pairing_id, status="scheduled"):
+def _flight(callsign, reg, ac_type, std, block_min, pairing_id, status="scheduled",
+            origin="LHR", destination="CDG"):
     std_iso = f"2026-06-12T{std}:00+00:00"
     sta = sim._add_minutes_to_clock(std_iso, block_min)
     return {
         "id": f"FLT-{callsign}",
         "callsign": callsign,
-        "origin": "LHR",
-        "destination": "CDG",
+        "origin": origin,
+        "destination": destination,
         "std": std_iso,
         "sta": sta,
         "block_min": block_min,
@@ -35,6 +36,7 @@ def _flight(callsign, reg, ac_type, std, block_min, pairing_id, status="schedule
         "aircraft_type": ac_type,
         "status": status,
         "delay_min": 0,
+        "reactionary_min": 0,
         "pax_count": 150,
         "assigned_crew_ids": [],
         "required_crew": {"CP": 1, "FO": 1, "SC": 1, "CC": 4, "type_qual": ac_type},
@@ -173,3 +175,99 @@ def test_cancelled_pairing_does_not_block_overlap():
     ]
     state = _state(flights)
     assert sim.check_aircraft_assignment(state, "P1", "G-EAGE") == []
+
+
+# ---- Position / station check ----
+
+def test_wrong_station_blocked():
+    # P1 is a night-stop return departing JFK (the original outbound aircraft
+    # is there, not at the hub). An idle hub-based spare can't operate it.
+    flights = [_flight("EGW900", "G-EAGN", "B777", "05:00", 460, "P1", origin="JFK", destination="LHR")]
+    fleet = [
+        {"reg": "G-EAGN", "type": "B777"},
+        {"reg": "G-EAGQ", "type": "B777", "spare": True},
+    ]
+    state = _state(flights, fleet=fleet)
+    w = sim.check_aircraft_assignment(state, "P1", "G-EAGQ")
+    assert any(x["code"] == "AC_WRONG_STATION" for x in w)
+    res = sim.assign_aircraft(state, "P1", "G-EAGQ")
+    assert res["applied"] is False
+    assert flights[0]["aircraft_reg"] == "G-EAGN"  # unchanged
+
+
+def test_correct_station_allowed_via_earlier_arrival():
+    # G-EAGE flies P1 into JFK, landing well before P2's departure — it's
+    # legitimately at JFK by then, so it can operate the JFK-origin P2.
+    flights = [
+        _flight("EGW100", "G-EAGE", "B777", "04:00", 100, "P1", origin="LHR", destination="JFK"),
+        _flight("EGW900", "G-EAGN", "B777", "08:00", 300, "P2", origin="JFK", destination="LHR"),
+    ]
+    fleet = [
+        {"reg": "G-EAGE", "type": "B777"},
+        {"reg": "G-EAGN", "type": "B777"},
+    ]
+    state = _state(flights, fleet=fleet)
+    w = sim.check_aircraft_assignment(state, "P2", "G-EAGE")
+    assert not any(x["code"] == "AC_WRONG_STATION" for x in w)
+
+
+# ---- Reactionary delay reset (tail-swap rebuild) ----
+
+def test_reset_reactionary_delays_strips_stale_knock_on():
+    f = _flight("EGW100", "G-EAGA", "A320", "06:00", 75, "P1")
+    f["delay_min"] = 45
+    f["reactionary_min"] = 30  # 15min direct (e.g. incident) + 30min reactionary
+    f["status"] = "delayed"
+    f["note"] = "REACTIONARY (IATA 93) · aircraft late"
+    state = _state([f])
+    sim.reset_reactionary_delays(state)
+    assert f["delay_min"] == 15  # non-reactionary baseline preserved
+    assert f["reactionary_min"] == 0
+    assert f["note"] == ""
+    assert f["status"] == "delayed"  # still delayed on its own merits
+
+
+def test_reset_reactionary_delays_reverts_status_when_delay_was_purely_reactionary():
+    f = _flight("EGW100", "G-EAGA", "A320", "06:00", 75, "P1")
+    f["delay_min"] = 30
+    f["reactionary_min"] = 30  # entirely reactionary
+    f["status"] = "delayed"
+    state = _state([f])
+    sim.reset_reactionary_delays(state)
+    assert f["delay_min"] == 0
+    assert f["status"] == "scheduled"
+
+
+def test_tail_swap_clears_stale_reactionary_delay():
+    # G-EAGA flies P1 then P2 back-to-back; P1 picks up a direct 60min delay
+    # (simulating an incident), which knocks P2's departure late too.
+    flights = [
+        _flight("EGW100", "G-EAGA", "A320", "06:00", 75, "P1"),
+        _flight("EGW200", "G-EAGA", "A320", "07:30", 75, "P2"),
+    ]
+    flights[0]["delay_min"] = 60
+    flights[0]["status"] = "delayed"
+    state = _state(flights, phase="OPS")
+    sim.propagate_reactionary_delays(state)
+    assert flights[1]["reactionary_min"] > 0
+    assert flights[1]["delay_min"] == flights[1]["reactionary_min"]
+
+    # Reassign P2 onto an idle hub spare — no more knock-on relationship to P1.
+    res = sim.assign_aircraft(state, "P2", "G-EAGE")
+    assert res["applied"] is True
+
+    # Mirrors the server route: rebuild from baseline before re-propagating.
+    sim.reset_reactionary_delays(state)
+    sim.propagate_reactionary_delays(state)
+    assert flights[1]["reactionary_min"] == 0
+    assert flights[1]["delay_min"] == 0
+    assert flights[1]["status"] == "scheduled"
+
+
+# ---- Next-day generation must also skip spares ----
+
+def test_next_day_generation_skips_spares():
+    flights = sim._generate_next_day_flights("2026-06-13T04:00:00+00:00", {}, [])
+    spare_regs = {ac["reg"] for ac in sim.FLEET if ac.get("spare")}
+    used_regs = {f["aircraft_reg"] for f in flights}
+    assert not (spare_regs & used_regs), "spare tails must stay idle on subsequent days too"
