@@ -75,6 +75,14 @@ contains the `MONGO_URL` line. Re-create it using the block in your setup guide.
 On Linux/Pi, verify it has the right number of lines: `wc -l backend/.env`
 (should be 4).
 
+**On Windows, this can happen even when the file looks fine.** Windows
+PowerShell 5.1's `Set-Content -Encoding utf8` writes a UTF-8 byte order mark
+(BOM) at the start of the file. Python's `.env` loader leaves that BOM stuck
+to the first key, so it's read as `﻿MONGO_URL` (invisible mark + name) instead
+of `MONGO_URL`, and the lookup fails. The setup guide now uses
+`-Encoding ascii` to avoid this — if you created `backend\.env` before that fix,
+delete it and re-run the block from [Setup — Windows, Step 4](Setup-Windows.md#step-4--create-the-backend-config-file).
+
 ### `ServerSelectionTimeoutError` / can't connect to MongoDB
 
 The database isn't reachable.
