@@ -231,3 +231,107 @@ def test_open_time_ignores_cancelled_flying():
     f["status"] = "cancelled"
     state = _state([f], crew=[_crew("CP1", "CP", "Larsen")])
     assert sim.open_time(state) == []
+
+
+# --------------------------------------------------- bulk duty planning
+
+def test_planning_applies_to_many_crew_across_many_days_at_once():
+    st = _state([], crew=[_crew("CP%d" % i, "CP", "N%d" % i) for i in range(4)])
+    st["phase"] = "ROSTER"
+    ids = [c["id"] for c in st["crew"]]
+    res = sim.plan_duty(st, ids, [2, 3, 4], "OFF")
+    assert res["ok"] is True
+    assert res["crew_count"] == 4 and res["day_count"] == 3
+    assert len(res["applied"]) == 12
+    for c in st["crew"]:
+        assert sorted(c["days_off_planned"]) == [2, 3, 4]
+
+
+def test_standby_is_now_something_the_controller_chooses():
+    # The reserve bank decided whether tomorrow's sickness was survivable and
+    # was drawn at random; the planner could only ever write days off.
+    st = _state([], crew=[_crew("CP1", "CP", "Larsen")])
+    st["phase"] = "ROSTER"
+    sim.plan_duty(st, ["CP1"], [2], "SBY_APT")
+    assert st["crew"][0]["duty_plan"]["2"] == "SBY_APT"
+    # Not a day off — the two must not be conflated.
+    assert st["crew"][0]["days_off_planned"] == []
+
+
+def test_planning_standby_over_a_day_off_replaces_it():
+    st = _state([], crew=[_crew("CP1", "CP", "Larsen")])
+    st["phase"] = "ROSTER"
+    sim.plan_duty(st, ["CP1"], [2], "OFF")
+    assert st["crew"][0]["days_off_planned"] == [2]
+    sim.plan_duty(st, ["CP1"], [2], "SBY_HOME")
+    assert st["crew"][0]["days_off_planned"] == []
+    assert st["crew"][0]["duty_plan"]["2"] == "SBY_HOME"
+
+
+def test_clear_removes_whatever_was_planned():
+    st = _state([], crew=[_crew("CP1", "CP", "Larsen")])
+    st["phase"] = "ROSTER"
+    sim.plan_duty(st, ["CP1"], [2], "OFF")
+    sim.plan_duty(st, ["CP1"], [2], "CLEAR")
+    assert st["crew"][0]["days_off_planned"] == []
+    assert "2" not in st["crew"][0]["duty_plan"]
+
+
+def test_the_past_and_a_running_day_are_not_plannable():
+    st = _state([], crew=[_crew("CP1", "CP", "Larsen")])
+    st["phase"] = "OPS"                       # day already running
+    past = sim.plan_duty(st, ["CP1"], [0], "OFF")
+    assert past["applied"] == []
+    assert past["skipped"][0]["reason"] == "cannot_change_past"
+    today = sim.plan_duty(st, ["CP1"], [st["day_number"]], "OFF")
+    assert today["skipped"][0]["reason"] == "day_in_progress"
+
+
+def test_an_unknown_duty_code_is_refused_with_the_allowed_set():
+    st = _state([], crew=[_crew("CP1", "CP", "Larsen")])
+    res = sim.plan_duty(st, ["CP1"], [2], "HOLIDAY")
+    assert res["ok"] is False
+    assert "SBY_APT" in res["allowed"]
+
+
+def test_planned_standby_takes_effect_at_the_rollover():
+    import random
+    random.seed(3)
+    st = sim.new_game("free_play")
+    # A crew who is not near the consecutive-duty limit, so the mandatory
+    # day-off rule does not (correctly) override the plan — see the next test.
+    crew = next(c for c in st["crew"]
+                if c["status"] == "available" and c["rank"] == "CP")
+    crew["days_since_off"] = 0
+    sim.plan_duty(st, [crew["id"]], [st["day_number"] + 1], "SBY_APT")
+    sim.auto_roster(st)
+    sim.start_day(st)
+    for _ in range(24):
+        sim.tick(st, minutes=60)
+    sim.end_day(st)
+    sim.advance_to_next_day(st)
+    assert crew["status"] == "standby"
+    assert crew["standby_type"] == sim.STANDBY_AIRPORT
+    assert crew["standby_elapsed_hr"] == 0.0
+    # The plan is consumed once the day it named has begun.
+    assert str(st["day_number"]) not in crew.get("duty_plan", {})
+
+
+def test_a_due_day_off_beats_a_planned_standby():
+    # Rest a crew is owed is not something a controller can roster away by
+    # putting them on reserve instead.
+    import random
+    random.seed(3)
+    st = sim.new_game("free_play")
+    crew = next(c for c in st["crew"]
+                if c["status"] == "available" and c["rank"] == "CP")
+    day = st["day_number"] + 1
+    sim.plan_duty(st, [crew["id"]], [day], "SBY_APT")
+    crew["days_off_planned"] = [day]          # rest already owed for that day
+    sim.auto_roster(st)
+    sim.start_day(st)
+    for _ in range(24):
+        sim.tick(st, minutes=60)
+    sim.end_day(st)
+    sim.advance_to_next_day(st)
+    assert crew["status"] == "off"

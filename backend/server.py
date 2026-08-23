@@ -69,6 +69,12 @@ class DisposeReq(BaseModel):
     action: str
 
 
+class PlanDutyReq(BaseModel):
+    crew_ids: list[str]
+    days: list[int]
+    code: str
+
+
 # ---------------- DB helpers ---------------- #
 async def _load(game_id: str) -> dict:
     doc = await db.games.find_one({"id": game_id}, {"_id": 0})
@@ -133,6 +139,16 @@ async def irregularities(game_id: str):
         "warning": sum(1 for i in items if i["severity"] == "warning"),
         "advisory": sum(1 for i in items if i["severity"] == "advisory"),
     }
+
+
+@api_router.post("/sim/{game_id}/plan_duty")
+async def plan_duty(game_id: str, body: PlanDutyReq):
+    """Write a planned duty across any number of crew and days at once."""
+    state = await _load(game_id)
+    result = sim.plan_duty(state, body.crew_ids, body.days, body.code)
+    if result.get("ok") and result.get("applied"):
+        await _save(state)
+    return result
 
 
 @api_router.get("/sim/{game_id}/open_time")
