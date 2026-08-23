@@ -2680,7 +2680,14 @@ MEL_OVERNIGHT_CLEAR_PROB = 0.7
 # cancels the rotation from the incident queue. Whichever they pick is graded
 # against the best feasible alternative — see _grade_aircraft_decision.
 CANCEL_DELAY_EQUIVALENT_MIN_PER_PAX = 240  # matches the cancellation pax-delay convention used elsewhere
-DECISION_GOOD_THRESHOLD_MIN = 15  # within this many minutes of optimal still grades as GOOD, not SUBOPTIMAL
+# Grading currency. The old scale was delay-minutes with a cancellation
+# converted at 240 min/pax, which made a cancel score ~70,000 against a tail
+# swap's ~225 — a 346x gap, 96.5% of it the flat pax term. The grader
+# therefore returned SUBOPTIMAL for every cancel including the ~10% where
+# cancelling genuinely produced the better day, and could not tell two tails
+# apart at all (median spread: 0 minutes). Grading in the same dollars the
+# score uses puts the verdict and the scoreboard back in agreement.
+DECISION_GOOD_THRESHOLD_USD = 15 * 110  # ~15 min of knock-on: "GOOD" keeps its old meaning
 
 # EU261/UK261-style passenger compensation: due when a flight ARRIVES 3h+
 # late, per passenger, scaled by haul — UNLESS the root cause is an
@@ -2898,13 +2905,57 @@ def _maybe_charge_duty_of_care(state: dict, flight: dict) -> dict | None:
     }
 
 
+def _aircraft_decision_still_open(state: dict, inc: dict) -> bool:
+    """Whether a grounding decision still has anything to decide.
+
+    A pairing can be cancelled from the incident queue while the pause is open
+    on one of its sibling sectors. The rotation is then gone, check_ferry
+    returns AC_DEPARTED for every tail, and Aircraft Control has nothing to
+    offer — but the clock stayed frozen. Measured at 20% of clock-pausing
+    groundings, which is the worst possible pacing failure in a game whose
+    whole pressure model is the clock."""
+    flight = next((f for f in state["flights"] if f["id"] == inc.get("flight_id")), None)
+    if flight is None:
+        return False
+    pairing_id = flight.get("pairing_id")
+    sectors = _pairing_sectors(state, pairing_id) if pairing_id else [flight]
+    return any(s["status"] in _AC_ACTIVE_STATUSES for s in sectors)
+
+
+def release_superseded_aircraft_decisions(state: dict) -> list[dict]:
+    """Close any grounding decision whose rotation no longer exists, so the
+    clock can run again. Resolved rather than deleted — it still happened, and
+    the debrief should say so."""
+    released = []
+    for inc in state.get("incidents", []):
+        if inc["status"] != "open" or not inc.get("requires_aircraft_decision"):
+            continue
+        if _aircraft_decision_still_open(state, inc):
+            continue
+        inc["status"] = "resolved"
+        inc["resolution"] = "superseded"
+        inc["resolution_label"] = "Superseded — rotation no longer active"
+        inc["resolution_note"] = (
+            f"{inc.get('flight_callsign')} was cancelled or completed before the "
+            f"grounded tail was decided; there was nothing left to reassign."
+        )
+        inc["resolved_at"] = state.get("clock")
+        inc["requires_aircraft_decision"] = False
+        released.append(inc)
+    return released
+
+
 def is_clock_paused(state: dict) -> bool:
     """True while any open incident requires an aircraft decision — a
     grounded tail (major TECH) that can only be resolved by the player
     reassigning a real tail via Aircraft Control or cancelling the rotation.
-    Nothing else about the operation is allowed to move while this is true."""
+    Nothing else about the operation is allowed to move while this is true.
+
+    A decision whose rotation has since gone does not count: it is not a
+    decision any more, it is a dead end."""
     return any(
         i["status"] == "open" and i.get("requires_aircraft_decision")
+        and _aircraft_decision_still_open(state, i)
         for i in state.get("incidents", [])
     )
 
@@ -2913,6 +2964,9 @@ def tick(state: dict, minutes: int = 30) -> dict:
     """Advance the simulation clock by `minutes`. May spawn incidents."""
     if state["phase"] != "OPS":
         return {"ok": False, "reason": "Not in OPS phase"}
+    # Close out any grounding decision whose rotation has gone before deciding
+    # whether the clock is frozen, or the sim wedges on a dead end.
+    superseded = release_superseded_aircraft_decisions(state)
     if is_clock_paused(state):
         blocking = [
             i["id"] for i in state["incidents"]
@@ -2922,6 +2976,7 @@ def tick(state: dict, minutes: int = 30) -> dict:
             "ok": True, "paused": True, "blocking_incidents": blocking,
             "new_incidents": [], "reactionary_delays": [], "curfew_violations": [],
             "escalations": [], "compensation_events": [],
+            "superseded_decisions": [i["id"] for i in superseded],
         }
     state["tick_count"] += 1
     clock = datetime.fromisoformat(state["clock"]) + timedelta(minutes=minutes)
@@ -3157,6 +3212,7 @@ def tick(state: dict, minutes: int = 30) -> dict:
         "new_incidents": new_incidents,
         "reactionary_delays": reactionary,
         "crew_timeouts": crew_timeouts,
+        "superseded_decisions": [i["id"] for i in superseded],
         "curfew_violations": curfew_violations,
         "escalations": escalations,
         "compensation_events": comp_events,
@@ -3226,12 +3282,15 @@ def _cancellable_pairing_sectors(state: dict, flight: dict) -> list[dict]:
 def _simulate_pairing_impact(state: dict, pairing_id: str, new_reg: str | None, cancel: bool = False) -> int:
     """Read-only what-if: on a SCRATCH copy of the day's flights, either
     re-tail `pairing_id`'s remaining active sectors onto `new_reg` or cancel
-    them, then measure the total network reactionary-delay minutes that
-    results. Cancellation is converted into the same delay-minute currency
-    via the CANCEL_DELAY_EQUIVALENT_MIN_PER_PAX convention (matching how a
-    cancellation's passenger-disruption cost is already booked elsewhere),
-    so every candidate — swap onto tail X, or cancel — is directly
-    comparable on one scale.
+    them, then price the result in DOLLARS, so every candidate — swap onto
+    tail X, or cancel — is comparable on the same scale the score itself uses.
+
+    Knock-on minutes are charged at DELAY_COST_PER_MIN_USD. A cancellation is
+    charged what it actually costs: the per-sector and per-pax cancellation
+    bill, UK261 Art. 7 compensation, and Art. 9 care — all of which the engine
+    already computes for the real thing. The old delay-minute proxy priced a
+    cancel at ~346x any tail swap and made the grader unable to credit a
+    correct cancellation.
 
     If `new_reg` isn't currently at the pairing's departure station, this
     automatically inserts a scratch positioning (ferry) sector first — the
@@ -3244,14 +3303,29 @@ def _simulate_pairing_impact(state: dict, pairing_id: str, new_reg: str | None, 
     reset_reactionary_delays(scratch)
 
     if cancel:
+        cancelled_ids = set()
         cancel_pax = 0
+        cancel_sectors = 0
         for f in scratch["flights"]:
             if f["id"] in flight_ids and f["status"] != "cancelled":
                 cancel_pax += f.get("pax_count", 0)
+                cancel_sectors += 1
+                cancelled_ids.add(f["id"])
                 f["status"] = "cancelled"
         propagate_reactionary_delays(scratch)
-        total = sum(f.get("reactionary_min", 0) for f in scratch["flights"])
-        return total + CANCEL_DELAY_EQUIVALENT_MIN_PER_PAX * cancel_pax
+        # Knock-on left in the network AFTER the cancellation, excluding the
+        # sectors we just deleted — deleting a flight's own delay is the price
+        # of the decision, not a benefit of it (same rule as reset-to-zero).
+        knock_on = sum(f.get("reactionary_min", 0) for f in scratch["flights"]
+                       if f["id"] not in cancelled_ids)
+        bill = 15000 * cancel_sectors + 280 * cancel_pax
+        bill += _cancellation_compensation_due(state, cancelled_ids)
+        bill += sum(
+            f.get("pax_count", 0) * (CARE_MEAL_USD_PER_PAX + CARE_HOTEL_USD_PER_PAX)
+            for f in state["flights"]
+            if f["id"] in cancelled_ids and not f.get("care_charged")
+        )
+        return knock_on * DELAY_COST_PER_MIN_USD + bill
 
     if new_reg:
         plan = _ferry_plan(state, pairing_id, new_reg)
@@ -3266,7 +3340,8 @@ def _simulate_pairing_impact(state: dict, pairing_id: str, new_reg: str | None, 
         if f["id"] in flight_ids and f["status"] in _AC_ACTIVE_STATUSES:
             f["aircraft_reg"] = new_reg
     propagate_reactionary_delays(scratch)
-    return sum(f.get("reactionary_min", 0) for f in scratch["flights"])
+    knock_on = sum(f.get("reactionary_min", 0) for f in scratch["flights"])
+    return knock_on * DELAY_COST_PER_MIN_USD
 
 
 def _best_aircraft_decision(state: dict, pairing_id: str) -> dict:
@@ -3290,13 +3365,13 @@ def _best_aircraft_decision(state: dict, pairing_id: str) -> dict:
             continue
         candidates.append({
             "choice": ac["reg"],
-            "impact_min": _simulate_pairing_impact(state, pairing_id, ac["reg"]),
+            "impact_usd": _simulate_pairing_impact(state, pairing_id, ac["reg"]),
         })
     candidates.append({
         "choice": "cancel",
-        "impact_min": _simulate_pairing_impact(state, pairing_id, None, cancel=True),
+        "impact_usd": _simulate_pairing_impact(state, pairing_id, None, cancel=True),
     })
-    candidates.sort(key=lambda c: c["impact_min"])
+    candidates.sort(key=lambda c: c["impact_usd"])
     return candidates[0]
 
 
@@ -3310,19 +3385,19 @@ def _grade_aircraft_decision(state: dict, pairing_id: str, chosen: str) -> dict:
     player_impact = _simulate_pairing_impact(
         state, pairing_id, None if chosen == "cancel" else chosen, cancel=(chosen == "cancel")
     )
-    delta = player_impact - best["impact_min"]
+    delta = player_impact - best["impact_usd"]
     if delta <= 0:
         verdict = "OPTIMAL"
-    elif delta <= DECISION_GOOD_THRESHOLD_MIN:
+    elif delta <= DECISION_GOOD_THRESHOLD_USD:
         verdict = "GOOD"
     else:
         verdict = "SUBOPTIMAL"
     return {
         "player_choice": chosen,
-        "player_impact_min": player_impact,
+        "player_impact_usd": player_impact,
         "best_choice": best["choice"],
-        "best_impact_min": best["impact_min"],
-        "delta_min": delta,
+        "best_impact_usd": best["impact_usd"],
+        "delta_usd": delta,
         "verdict": verdict,
     }
 
@@ -3710,6 +3785,30 @@ def reset_reactionary_delays(state: dict) -> None:
             f["status"] = "scheduled"
 
 
+_SEVERITY_ORDER = {"critical": 0, "warning": 1, "advisory": 2}
+
+
+def _time_pressure_severity(state: dict, flight: dict | None,
+                            warn_min: int) -> str:
+    """How urgent a condition on `flight` is, from how long is left before it
+    goes. A problem four hours out is a task; the same problem twenty minutes
+    out is blocking. Without this, three of five codes were flat `critical`
+    and the BLOCKING count carried no information at all."""
+    if flight is None:
+        return "critical"
+    try:
+        dep = datetime.fromisoformat(flight["std"]) + timedelta(
+            minutes=flight.get("delay_min", 0))
+        left = (dep - datetime.fromisoformat(state["clock"])).total_seconds() / 60
+    except (KeyError, ValueError):
+        return "critical"
+    if left <= 60:
+        return "critical"
+    if left <= warn_min:
+        return "warning"
+    return "advisory"
+
+
 def crew_irregularities(state: dict) -> list[dict]:
     """Everything currently wrong with the crewing picture, derived from the
     RULES rather than from random events.
@@ -3724,6 +3823,20 @@ def crew_irregularities(state: dict) -> list[dict]:
     Returns the house `{code, severity, message, rule_ref}` shape, worst first.
     """
     out: list[dict] = []
+    # Flights and pairings the game has already put on a card. Presenting the
+    # same condition in both streams is the canonical nuisance-alarm pattern —
+    # one busted duty rendered as a card AND as one monitor line per crew
+    # member, six lines for one card on a 2+4 crew.
+    incident_flights = {
+        i.get("flight_id") for i in state.get("incidents", []) if i["status"] == "open"
+    }
+    incident_pairings = {
+        i.get("pairing_id") for i in state.get("incidents", []) if i["status"] == "open"
+    }
+    suppressed: list[dict] = []
+
+    def emit(w, covered=False):
+        (suppressed if covered else out).append(w)
 
     # Open sectors — uncovered flying. The real desk's first question.
     completeness = roster_completeness(state)
@@ -3731,12 +3844,15 @@ def crew_irregularities(state: dict) -> list[dict]:
         gaps = ", ".join(f"{n}x {r}" for r, n in m["need"].items() if n)
         if not gaps:
             continue
-        out.append({
-            "code": "OPEN_SECTOR", "severity": "critical",
+        fl = next((f for f in state["flights"] if f["id"] == m["flight_id"]), None)
+        emit({
+            "code": "OPEN_SECTOR",
+            "severity": _time_pressure_severity(state, fl, warn_min=240),
             "message": f"{m['callsign']} is uncovered — short {gaps}.",
             "rule_ref": "Operational — crew complement",
             "flight_id": m["flight_id"],
-        })
+            "pairing_id": fl.get("pairing_id") if fl else None,
+        }, covered=m["flight_id"] in incident_flights)
 
     # Duties that will not make it at the delays standing right now.
     seen_pairings: set = set()
@@ -3748,7 +3864,15 @@ def crew_irregularities(state: dict) -> list[dict]:
             continue
         for w in check_crew_hours(state, f):
             seen_pairings.add(pid)
-            out.append({**w, "code": "FDP_TIMEOUT_PENDING", "flight_id": f["id"]})
+            info = crew_duty_clock(state, w["crew_id"])
+            slack = info["slack_min"] if info and info["on_duty"] else None
+            emit({
+                **w, "code": "FDP_TIMEOUT_PENDING",
+                # Graded off the room actually left, not a flat critical.
+                "severity": ("critical" if slack is None or slack < 0
+                             else "warning" if slack <= 60 else "advisory"),
+                "flight_id": f["id"], "pairing_id": pid,
+            }, covered=pid in incident_pairings or f["id"] in incident_flights)
 
     # Crew rostered somewhere they physically are not.
     for f in state["flights"]:
@@ -3758,22 +3882,26 @@ def crew_irregularities(state: dict) -> list[dict]:
         for cid in f.get("assigned_crew_ids", []):
             if _crew_position_before(state, cid, dep) != f["origin"]:
                 crew = next((c for c in state["crew"] if c["id"] == cid), None)
-                out.append({
-                    "code": "CREW_OUT_OF_POSITION", "severity": "critical",
+                emit({
+                    "code": "CREW_OUT_OF_POSITION",
+                    # Blocking only once there is no longer time to position
+                    # them; the deadhead report buffer is the real lead time.
+                    "severity": _time_pressure_severity(
+                        state, f, warn_min=DEADHEAD_REPORT_BUFFER_MIN * 4),
                     "crew_id": cid,
                     "message": (
                         f"{cid} {crew['name'] if crew else ''} is rostered on {f['callsign']} "
                         f"out of {f['origin']} but will not be there — position them or replace them."
                     ),
                     "rule_ref": "Operational — crew positioning",
-                    "flight_id": f["id"],
-                })
+                    "flight_id": f["id"], "pairing_id": f.get("pairing_id"),
+                }, covered=f["id"] in incident_flights)
 
     # Crew at the consecutive-duty limit.
     for c in state["crew"]:
         if c.get("days_since_off", 0) >= MAX_CONSECUTIVE_DUTY_DAYS:
-            out.append({
-                "code": "DAYS_OFF_DUE", "severity": "warning",
+            emit({
+                "code": "DAYS_OFF_DUE", "severity": "advisory",
                 "message": (
                     f"{c['id']} {c['name']} has worked {c['days_since_off']} consecutive "
                     f"duty days — a day off is due."
@@ -3786,8 +3914,9 @@ def crew_irregularities(state: dict) -> list[dict]:
     for rank in ("CP", "FO"):
         pool = [c for c in state["crew"] if c["rank"] == rank and c["status"] == "standby"]
         if len(pool) <= 1:
-            out.append({
-                "code": "STANDBY_POOL_LOW", "severity": "warning",
+            emit({
+                "code": "STANDBY_POOL_LOW",
+                "severity": "warning" if len(pool) == 0 else "advisory",
                 "message": (
                     f"{len(pool)} {rank} left on standby. The next sickness or timeout has "
                     f"nowhere to go."
@@ -3795,9 +3924,20 @@ def crew_irregularities(state: dict) -> list[dict]:
                 "rule_ref": "Operational — reserve cover",
             })
 
-    order = {"critical": 0, "warning": 1}
-    out.sort(key=lambda w: order.get(w["severity"], 2))
+    state["_suppressed_irregularities"] = suppressed
+    out.sort(key=lambda w: _SEVERITY_ORDER.get(w["severity"], 3))
     return out
+
+
+def crew_irregularities_full(state: dict) -> dict:
+    """Irregularities plus the ones held back because an incident already
+    covers them. Returned separately rather than dropped, so the desk can say
+    "3 held by open incidents" and nothing is ever hidden from the player."""
+    live = crew_irregularities(state)
+    return {
+        "irregularities": live,
+        "suppressed": state.pop("_suppressed_irregularities", []),
+    }
 
 
 def crew_duty_clock(state: dict, crew_id: str) -> dict | None:

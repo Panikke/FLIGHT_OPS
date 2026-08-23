@@ -511,12 +511,15 @@ function ReassignModal({ state, rotation, fleet, minTurn = 45, hub = "LHR", onCl
                                 </div>
                             )}
                             <div className="font-mono-jb text-xs mt-2 t-sec">
-                                YOU CHOSE {grade.player_choice} — network impact +{grade.player_impact_min}min reactionary delay
+                                YOU CHOSE {grade.player_choice} — total impact $
+                                {grade.player_impact_usd?.toLocaleString()}
                             </div>
                             <div className="font-mono-jb text-xs mt-1 t-muted">
-                                BEST AVAILABLE WAS {grade.best_choice === "cancel" ? "CANCEL" : grade.best_choice} — +{grade.best_impact_min}min
-                                {grade.delta_min > 0 && ` (this choice cost the network ${grade.delta_min} extra minute(s) vs. optimal)`}
-                                {grade.delta_min <= 0 && " — you found it."}
+                                BEST AVAILABLE WAS {grade.best_choice === "cancel" ? "CANCEL" : grade.best_choice} — $
+                                {grade.best_impact_usd?.toLocaleString()}
+                                {grade.delta_usd > 0 &&
+                                    ` (this choice cost $${grade.delta_usd.toLocaleString()} more than optimal)`}
+                                {grade.delta_usd <= 0 && " — you found it."}
                             </div>
                         </div>
                     )}

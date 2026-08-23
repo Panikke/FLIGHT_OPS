@@ -109,11 +109,13 @@ function DecisionGrade({ grade }) {
                 DECISION GRADE: {grade.verdict}
             </div>
             <div className="t-sec mt-1">
-                YOU CHOSE {grade.player_choice === "cancel" ? "CANCEL" : grade.player_choice} · network impact +{grade.player_impact_min}min
+                YOU CHOSE {grade.player_choice === "cancel" ? "CANCEL" : grade.player_choice} · total impact $
+                {grade.player_impact_usd?.toLocaleString()}
             </div>
             <div className="t-muted mt-0.5">
-                BEST AVAILABLE: {grade.best_choice === "cancel" ? "CANCEL" : grade.best_choice} · +{grade.best_impact_min}min
-                {grade.delta_min > 0 && ` (you cost the network ${grade.delta_min} extra min)`}
+                BEST AVAILABLE: {grade.best_choice === "cancel" ? "CANCEL" : grade.best_choice} · $
+                {grade.best_impact_usd?.toLocaleString()}
+                {grade.delta_usd > 0 && ` (you cost $${grade.delta_usd.toLocaleString()} more)`}
             </div>
         </div>
     );

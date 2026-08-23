@@ -39,11 +39,13 @@ export function delayTone(min) {
  * other way round, and never both for the same severity.
  */
 export function severityTone(severity) {
-    return severity === "critical" ? "t-crit" : "t-warn";
+    if (severity === "critical") return "t-crit";
+    if (severity === "advisory") return "t-muted";
+    return "t-warn";
 }
 
 export function severityBorder(severity) {
-    return severity === "critical"
-        ? "border-[var(--status-critical)]"
-        : "border-[var(--status-warning)]";
+    if (severity === "critical") return "border-[var(--status-critical)]";
+    if (severity === "advisory") return "border-white/20";
+    return "border-[var(--status-warning)]";
 }

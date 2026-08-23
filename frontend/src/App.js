@@ -159,7 +159,10 @@ function App() {
             setToast(`✕ ${res.reason || "Action not possible — pick another option"}`);
         } else if (res?.incident?.decision_grade) {
             const g = res.incident.decision_grade;
-            setToast(`${g.verdict} decision · ${g.player_choice} (+${g.player_impact_min}m) vs best ${g.best_choice} (+${g.best_impact_min}m)`);
+            setToast(
+                `${g.verdict} decision · ${g.player_choice} ($${(g.player_impact_usd / 1000).toFixed(0)}k)` +
+                    ` vs best ${g.best_choice} ($${(g.best_impact_usd / 1000).toFixed(0)}k)`
+            );
         }
     }
 

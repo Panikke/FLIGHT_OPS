@@ -121,11 +121,13 @@ async def irregularities(game_id: str):
     """The problem monitor: what is wrong right now by the rules, as opposed
     to what has happened to the player by chance."""
     state = await _load(game_id)
-    items = sim.crew_irregularities(state)
+    full = sim.crew_irregularities_full(state)
+    items = full["irregularities"]
     return {
-        "irregularities": items,
+        **full,
         "critical": sum(1 for i in items if i["severity"] == "critical"),
         "warning": sum(1 for i in items if i["severity"] == "warning"),
+        "advisory": sum(1 for i in items if i["severity"] == "advisory"),
     }
 
 

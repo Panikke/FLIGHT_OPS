@@ -379,3 +379,81 @@ def test_force_still_covers_a_genuine_commercial_call():
     res = sim.assign_crew(state, "FLT-EGW100", "CP1", force=True)
     assert res["applied"] is True
     assert state["kpis"]["legality_breaches"] >= 1
+
+
+# ------------------------------------------------- dead-end grounding pause
+
+def test_a_grounding_whose_rotation_is_gone_stops_freezing_the_clock():
+    # A pairing can be cancelled from the incident queue while the pause is
+    # open on a sibling sector. The rotation is then gone, Aircraft Control has
+    # nothing to offer, and the clock stayed frozen forever — measured at 20%
+    # of clock-pausing groundings.
+    f = _flight("EGW100", "G-EAGA", "A320", "10:00", 75, "P1")
+    state = _state([f])
+    state["incidents"].append({
+        "id": "INC-9", "type": "TECH", "severity": "major", "status": "open",
+        "flight_id": f["id"], "flight_callsign": "EGW100", "pairing_id": "P1",
+        "raised_at": state["clock"], "escalated": False, "options": [],
+        "requires_aircraft_decision": True, "resolution": None,
+    })
+    assert sim.is_clock_paused(state) is True
+
+    # The rotation goes away by another route.
+    f["status"] = "cancelled"
+    assert sim.is_clock_paused(state) is False
+
+    released = sim.release_superseded_aircraft_decisions(state)
+    assert [i["id"] for i in released] == ["INC-9"]
+    inc = state["incidents"][0]
+    assert inc["status"] == "resolved"
+    assert inc["resolution"] == "superseded"
+    # Resolved, not deleted — it still happened and the debrief should say so.
+    assert "EGW100" in inc["resolution_note"]
+
+
+def test_a_live_grounding_still_freezes_the_clock():
+    f = _flight("EGW100", "G-EAGA", "A320", "10:00", 75, "P1")
+    state = _state([f])
+    state["incidents"].append({
+        "id": "INC-9", "type": "TECH", "severity": "major", "status": "open",
+        "flight_id": f["id"], "flight_callsign": "EGW100", "pairing_id": "P1",
+        "raised_at": state["clock"], "escalated": False, "options": [],
+        "requires_aircraft_decision": True, "resolution": None,
+    })
+    assert sim.is_clock_paused(state) is True
+    assert sim.release_superseded_aircraft_decisions(state) == []
+    assert sim.is_clock_paused(state) is True
+
+
+# ----------------------------------------------- irregularity suppression
+
+def test_a_condition_already_on_a_card_is_not_also_a_condition():
+    # The same uncovered sector rendering as both an incident and a monitor
+    # line is the canonical nuisance-alarm pattern.
+    f = _flight("EGW100", "G-EAGA", "A320", "10:00", 75, "P1", crew_ids=[])
+    state = _state([f], crew=[_crew("CP1", "CP", "Larsen")])
+    assert any(w["code"] == "OPEN_SECTOR" for w in sim.crew_irregularities(state))
+
+    state["incidents"].append({
+        "id": "INC-1", "type": "CREW_SICK", "severity": "minor", "status": "open",
+        "flight_id": f["id"], "flight_callsign": "EGW100", "pairing_id": "P1",
+        "raised_at": state["clock"], "escalated": False, "options": [],
+        "resolution": None,
+    })
+    full = sim.crew_irregularities_full(state)
+    assert not any(w["code"] == "OPEN_SECTOR" for w in full["irregularities"])
+    # Held back, not hidden.
+    assert any(w["code"] == "OPEN_SECTOR" for w in full["suppressed"])
+
+
+def test_severity_grades_off_time_left_not_a_flat_critical():
+    # An uncovered sector nine hours out is a task; the same sector twenty
+    # minutes out is blocking. Three of five codes used to be flat critical,
+    # so the BLOCKING count carried no information.
+    far = _flight("EGW100", "G-EAGA", "A320", "20:00", 75, "P1", crew_ids=[])
+    near = _flight("EGW200", "G-EAGB", "A320", "08:30", 75, "P2", crew_ids=[])
+    state = _state([far, near], crew=[_crew("CP1", "CP", "Larsen")])
+    by_flight = {w["flight_id"]: w for w in sim.crew_irregularities(state)
+                 if w["code"] == "OPEN_SECTOR"}
+    assert by_flight["FLT-EGW200"]["severity"] == "critical"
+    assert by_flight["FLT-EGW100"]["severity"] == "advisory"
