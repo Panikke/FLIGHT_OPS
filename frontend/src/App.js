@@ -18,6 +18,7 @@ import CascadeStrip from "./components/CascadeStrip";
 import useHotkeys from "./lib/useHotkeys";
 import { NAV } from "./components/Sidebar";
 import ProblemMonitor from "./components/ProblemMonitor";
+import CrewDisposition from "./components/views/CrewDisposition";
 
 const STORAGE_KEY = "egw_occ_game_id";
 
@@ -298,7 +299,7 @@ function App() {
                 />
                 <div className="flex-1 overflow-hidden flex flex-col">
                     {state.phase === "OPS" && (
-                        <ProblemMonitor state={state} onOpenCrew={() => setView("crew")} />
+                        <ProblemMonitor state={state} onOpenCrew={() => setView("disposition")} />
                     )}
                     {state.phase === "OPS" && <CascadeStrip state={state} />}
                     <div className="flex-1 overflow-hidden">
@@ -321,6 +322,9 @@ function App() {
                         />
                     )}
                     {showView === "crew" && <CrewPanel state={state} />}
+                    {showView === "disposition" && (
+                        <CrewDisposition state={state} onChanged={refresh} />
+                    )}
                     {showView === "calendar" && <CrewRoster state={state} onChanged={refresh} />}
                     {showView === "advisor" && (
                         <AdvisorPanel

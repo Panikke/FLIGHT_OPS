@@ -65,6 +65,10 @@ class ResetToZeroReq(BaseModel):
     pairing_ids: list[str]
 
 
+class DisposeReq(BaseModel):
+    action: str
+
+
 # ---------------- DB helpers ---------------- #
 async def _load(game_id: str) -> dict:
     doc = await db.games.find_one({"id": game_id}, {"_id": 0})
@@ -129,6 +133,36 @@ async def irregularities(game_id: str):
         "warning": sum(1 for i in items if i["severity"] == "warning"),
         "advisory": sum(1 for i in items if i["severity"] == "advisory"),
     }
+
+
+@api_router.get("/sim/{game_id}/crew_disposition")
+async def crew_disposition(game_id: str):
+    """The disposition desk: every crew who is not where they need to be, and
+    what can be done about each of them."""
+    state = await _load(game_id)
+    rows = sim.crew_disposition(state)
+    return {
+        "disposition": rows,
+        "handled_today": rows[0]["handled_today"] if rows else 0,
+        "stranded": sum(1 for r in rows if r["at"] != r["base"]),
+        "unreachable_duty": sum(
+            1 for r in rows if r["next_duty"] and not r["next_duty"]["reachable"]),
+    }
+
+
+@api_router.post("/sim/{game_id}/crew/{crew_id}/dispose")
+async def dispose_crew(game_id: str, crew_id: str, body: DisposeReq):
+    state = await _load(game_id)
+    result = sim.dispose_crew(state, crew_id, body.action)
+    if result.get("applied"):
+        await _save(state)
+    return result
+
+
+@api_router.post("/sim/{game_id}/crew/{crew_id}/preview_dispose")
+async def preview_dispose_crew(game_id: str, crew_id: str, body: DisposeReq):
+    state = await _load(game_id)
+    return sim.preview_crew_disposition(state, crew_id, body.action)
 
 
 @api_router.get("/sim/{game_id}/crew_roster")

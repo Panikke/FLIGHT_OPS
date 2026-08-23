@@ -625,6 +625,7 @@ def new_game(scenario: str = "free_play") -> dict:
             "pax_disrupted": 0,
             "reactionary_min": 0,
             "duty_of_care_usd": 0,
+            "hotac_usd": 0,
             "discretion_used_count": 0,
             "discretion_reports": 0,
             "delay_cost_usd": 0,
@@ -727,6 +728,7 @@ def advance_to_next_day(state: dict) -> dict:
     # Per-crew block flown today
     today_block_by_crew: dict[str, float] = {}
     long_haul_assignments: dict[str, dict] = {}  # crew_id -> {station, route_back, ...}
+    hotac_bill = 0                                # crew accommodation away from base
     for f in state["flights"]:
         if f["status"] == "cancelled":
             continue
@@ -788,6 +790,13 @@ def advance_to_next_day(state: dict) -> dict:
             if c["id"] in long_haul_assignments
             else _crew_end_of_day_station(state, c)
         )
+        if c["station"] != c.get("base", AIRLINE["hub"]):
+            # ORO.FTL.105: away from base, accommodating the crew is the
+            # operator's responsibility. Charged whether or not the player
+            # made the call deliberately.
+            hotac_bill += CREW_HOTEL_USD + CREW_TRANSPORT_USD + CREW_PERDIEM_USD
+            c["hotac_nights"] = c.get("hotac_nights", 0) + 1
+        c.pop("disposition", None)
         c.pop("discretion_used", None)
         c.pop("rest_floor_next_hr", None)
         # Positioning legs carry absolute timestamps from today; left in place
@@ -917,14 +926,19 @@ def advance_to_next_day(state: dict) -> dict:
         "pax_disrupted": 0,
         "reactionary_min": 0,
         "duty_of_care_usd": 0,
+        "hotac_usd": 0,
         "discretion_used_count": 0,
         "discretion_reports": 0,
         "delay_cost_usd": 0,
         "completion_factor_pct": 100.0,
+        "hotac_usd": hotac_bill,
         "score": 1000,
     }
+    state["kpis"]["cost_usd"] += hotac_bill
+    _recompute_kpis(state)
     return {
         "day_number": state["day_number"],
+        "hotac_usd": hotac_bill,
         "pre_rostered_returns": pre_rostered,
         "campaign_kpis": ck,
     }
@@ -1726,6 +1740,55 @@ def _crew_position_before(state: dict, crew_id: str, before_dt: datetime,
 DEADHEAD_SEAT_USD = 450          # a seat on our own metal, revenue foregone
 DEADHEAD_HANDLING_USD = 900      # rebooking, ground transport, admin
 DEADHEAD_REPORT_BUFFER_MIN = 60  # must land this long before the duty reports
+
+# --- Crew accommodation (HOTAC) --------------------------------------------
+# ORO.FTL.105 defines home base as the place where the operator is NOT
+# responsible for accommodating the crew — so away from base, it is. Suitable
+# accommodation means a separate quiet room per crew member with a bed,
+# controllable temperature and light, and access to food and drink. The
+# industry calls the whole package HOTAC: hotel plus ground transport.
+# https://regulatorylibrary.caa.co.uk/965-2012/Content/Document%20Structure/03%20ORO/2%20Regs/05040_ORO.FTL.105_Definitions.htm
+CREW_HOTEL_USD = 180             # room, per crew member per night
+CREW_TRANSPORT_USD = 45          # airport-hotel-airport ground transport
+CREW_PERDIEM_USD = 65            # subsistence allowance away from base
+
+
+def _positioning_leg(state: dict, crew_id: str, to_station: str,
+                     arrive_by: datetime | None = None,
+                     exclude_flight_id: str | None = None) -> dict | None:
+    """The earliest sector that could carry `crew_id` to `to_station`, or None.
+
+    The general form of `_deadhead_plan`: that one asks "can I get them to a
+    flight in time to operate it", this one asks "can I get them to a station
+    at all" — which is the question the disposition desk asks when sending a
+    stranded crew home rather than onto a specific duty."""
+    now = datetime.fromisoformat(state["clock"])
+    origin = _crew_position_before(state, crew_id, now)
+    if origin == to_station:
+        return None                       # already there
+
+    best = None
+    for f in state["flights"]:
+        if f["id"] == exclude_flight_id or f["status"] in ("cancelled", "landed"):
+            continue
+        if f["origin"] != origin or f["destination"] != to_station:
+            continue
+        f_dep = datetime.fromisoformat(f["std"]) + timedelta(minutes=f.get("delay_min", 0))
+        f_arr = datetime.fromisoformat(f["sta"]) + timedelta(minutes=f.get("delay_min", 0))
+        if f_dep < now:
+            continue
+        if arrive_by is not None and f_arr > arrive_by:
+            continue
+        if best is None or f_arr < best["arrives"]:
+            best = {
+                "carrier_flight_id": f["id"], "carrier_callsign": f["callsign"],
+                "from": origin, "to": to_station,
+                "departs": f_dep.isoformat(), "arrives": f_arr,
+                "block_min": f["block_min"],
+            }
+    if best:
+        best["arrives"] = best["arrives"].isoformat()
+    return best
 
 
 def _deadhead_plan(state: dict, flight: dict, crew_id: str) -> dict | None:
@@ -3940,6 +4003,261 @@ def crew_irregularities_full(state: dict) -> dict:
     }
 
 
+# ------------------- Crew disposition desk ------------------- #
+#
+# Where a stranded crew gets DEALT WITH. The engine has always known that crew
+# have a physical position; until now the only thing it did with that knowledge
+# was raise a warning ending "position them or replace them" — neither of which
+# the player could actually do. Real crew tracking works this population as a
+# queue with a fixed option set, and these are those options.
+
+_DISPOSITION_ACTIONS = ("position_home", "hold_downroute", "recrew_local", "night_stop")
+
+
+def _next_duty_for(state: dict, crew_id: str) -> dict | None:
+    """The next sector this crew is rostered to operate, if any."""
+    upcoming = [
+        f for f in state["flights"]
+        if crew_id in f.get("assigned_crew_ids", [])
+        and f["status"] in ("scheduled", "delayed", "boarding")
+    ]
+    upcoming.sort(key=lambda f: f["std"])
+    return upcoming[0] if upcoming else None
+
+
+def _disposition_options(state: dict, crew: dict, at: str) -> list[dict]:
+    """The priced, feasibility-checked menu for one out-of-position crew.
+
+    Same `{action, label, cost_usd, feasible, reason, detail}` shape the
+    incident queue already renders, so the desk reuses that component."""
+    base = crew.get("base", AIRLINE["hub"])
+    hotac = CREW_HOTEL_USD + CREW_TRANSPORT_USD + CREW_PERDIEM_USD
+    next_duty = _next_duty_for(state, crew["id"])
+    opts = []
+
+    # 1. Position home — fly them back as passengers. ORO.FTL.215: counts as
+    #    duty and FDP but not as a sector.
+    leg = _positioning_leg(state, crew["id"], base)
+    opts.append({
+        "action": "position_home",
+        "label": f"Position Home via {leg['carrier_callsign']}" if leg else "Position Home",
+        "cost_usd": DEADHEAD_SEAT_USD + DEADHEAD_HANDLING_USD if leg else 0,
+        "feasible": leg is not None,
+        "reason": None if leg else f"No sector from {at} to {base} left today.",
+        "detail": (
+            f"rides {leg['carrier_callsign']} {leg['from']}->{leg['to']}, "
+            f"in at {leg['arrives'][11:16]}Z; +{leg['block_min']}min FDP, not a sector"
+        ) if leg else None,
+    })
+
+    # 2. Hold down-route — leave them to operate the return. Looks free; it is
+    #    a hotel bill and it locks the crew out of everything else.
+    opts.append({
+        "action": "hold_downroute",
+        "label": "Hold Down-Route For The Return",
+        "cost_usd": hotac,
+        "feasible": next_duty is not None and next_duty["origin"] == at,
+        "reason": (
+            None if next_duty is not None and next_duty["origin"] == at
+            else f"Nothing rostered for them out of {at} to hold for."
+        ),
+        "detail": (
+            f"holds for {next_duty['callsign']} {next_duty['std'][11:16]}Z; "
+            f"HOTAC {hotac} USD, unavailable elsewhere until then"
+        ) if next_duty else None,
+    })
+
+    # 3. Re-crew locally — use somebody already at that station instead. For a
+    #    single-base airline this is usually impossible, and saying so plainly
+    #    is more useful than hiding the option.
+    local = None
+    if next_duty is not None:
+        for rank in ("CP", "FO", "SC", "CC"):
+            cands = [
+                c for c in _legal_candidates(state, next_duty, rank, ("available", "standby"))
+                if c["id"] != crew["id"]
+                and _crew_position_before(state, c["id"], datetime.fromisoformat(next_duty["std"])) == at
+            ]
+            if cands:
+                local = cands[0]
+                break
+    opts.append({
+        "action": "recrew_local",
+        "label": "Re-Crew Locally",
+        "cost_usd": 1200 if local else 0,
+        "feasible": local is not None,
+        "reason": None if local else f"No legal crew already at {at} to take it.",
+        "detail": f"{local['id']} {local['name']} ({local['rank']}) is at {at}" if local else None,
+        "replacement_crew_id": local["id"] if local else None,
+    })
+
+    # 4. Night-stop — book the hotel, stand them down, pick them up tomorrow.
+    #    This is what happens today by default, silently and for free.
+    opts.append({
+        "action": "night_stop",
+        "label": "Night-Stop On Hotel Account",
+        "cost_usd": hotac,
+        "feasible": True,
+        "reason": None,
+        "detail": f"HOTAC {hotac} USD at {at}; released to rest, off tomorrow's roster",
+    })
+    return opts
+
+
+def crew_disposition(state: dict) -> list[dict]:
+    """Every crew member who is not where they need to be, with what can be
+    done about each of them.
+
+    One row per crew, worst first: those with a duty they cannot make ahead of
+    those merely away from base."""
+    rows = []
+    handled = 0
+    now = datetime.fromisoformat(state["clock"])
+    for c in state["crew"]:
+        if c["status"] in ("sick", "off"):
+            continue
+        # Already dealt with today. This is a worklist, so a resolved item
+        # leaves it — otherwise the player cannot tell what they have done.
+        # Cleared at the day rollover.
+        if c.get("disposition"):
+            handled += 1
+            continue
+        base = c.get("base", AIRLINE["hub"])
+        at = _crew_position_before(state, c["id"], now)
+        next_duty = _next_duty_for(state, c["id"])
+        # A crew down-route with their next duty departing from where they
+        # actually are is not a problem — that is an ordinary long-haul
+        # night-stop, and 49 of them would bury the handful that need a call.
+        # The desk is for crew who need a DECISION: a duty they cannot reach,
+        # or nowhere to go from where they are.
+        misplaced = next_duty is not None and next_duty["origin"] != at
+        adrift = at != base and next_duty is None
+        if not misplaced and not adrift:
+            continue
+        clock_info = crew_duty_clock(state, c["id"])
+        rows.append({
+            "crew_id": c["id"], "name": c["name"], "rank": c["rank"],
+            "base": base, "at": at,
+            "why": "unreachable_duty" if misplaced else "no_way_back",
+            "status": c["status"],
+            "disposition": c.get("disposition"),
+            "next_duty": {
+                "flight_id": next_duty["id"], "callsign": next_duty["callsign"],
+                "origin": next_duty["origin"], "destination": next_duty["destination"],
+                "std": next_duty["std"],
+                "reachable": not misplaced,
+            } if next_duty else None,
+            "slack_min": clock_info["slack_min"] if clock_info and clock_info["on_duty"] else None,
+            "options": _disposition_options(state, c, at),
+        })
+    # A crew who cannot make a duty they are rostered on is the urgent case.
+    rows.sort(key=lambda r: (0 if (r["next_duty"] and not r["next_duty"]["reachable"]) else 1,
+                             r["at"], r["crew_id"]))
+    for r in rows:
+        r["handled_today"] = handled
+    return rows
+
+
+def preview_crew_disposition(state: dict, crew_id: str, action: str) -> dict:
+    """Read-only price for one disposition action, per the preview convention
+    every costly lever in this engine follows."""
+    crew = next((c for c in state["crew"] if c["id"] == crew_id), None)
+    if not crew:
+        return {"ok": False, "reason": "Crew not found."}
+    if action not in _DISPOSITION_ACTIONS:
+        return {"ok": False, "reason": f"Unknown disposition action '{action}'."}
+    at = _crew_position_before(state, crew_id, datetime.fromisoformat(state["clock"]))
+    opt = next((o for o in _disposition_options(state, crew, at) if o["action"] == action), None)
+    return {"ok": True, "crew_id": crew_id, "at": at, "option": opt}
+
+
+def dispose_crew(state: dict, crew_id: str, action: str) -> dict:
+    """Act on an out-of-position crew. Mirrors resolve_incident: validate
+    live, then apply, then log."""
+    crew = next((c for c in state["crew"] if c["id"] == crew_id), None)
+    if not crew:
+        return {"ok": False, "applied": False, "reason": "Crew not found."}
+    if action not in _DISPOSITION_ACTIONS:
+        return {"ok": False, "applied": False, "reason": f"Unknown action '{action}'."}
+
+    now = datetime.fromisoformat(state["clock"])
+    at = _crew_position_before(state, crew_id, now)
+    opt = next((o for o in _disposition_options(state, crew, at) if o["action"] == action), None)
+    if not opt or not opt["feasible"]:
+        return {"ok": False, "applied": False,
+                "reason": (opt or {}).get("reason") or "Option not available."}
+
+    base = crew.get("base", AIRLINE["hub"])
+    cost = opt["cost_usd"]
+    note = None
+
+    if action == "position_home":
+        leg = _positioning_leg(state, crew_id, base)
+        if not leg:
+            return {"ok": False, "applied": False,
+                    "reason": "The connection went while you were deciding."}
+        crew.setdefault("positioning", []).append(leg)
+        # ORO.FTL.215: positioning is duty and FDP, but not a sector.
+        crew["fdp_used_min"] = crew.get("fdp_used_min", 0) + leg["block_min"]
+        crew["duty_7d_hr"] = round(crew.get("duty_7d_hr", 0) + leg["block_min"] / 60, 2)
+        crew["station"] = base
+        # They are going home, so they are not operating whatever they were on.
+        _release_crew_from_future_sectors(state, crew_id)
+        note = (f"{crew_id} positioned {leg['from']}->{leg['to']} on "
+                f"{leg['carrier_callsign']}, in {leg['arrives'][11:16]}Z")
+
+    elif action == "hold_downroute":
+        crew["station"] = at
+        crew["hotac_nights"] = crew.get("hotac_nights", 0) + 1
+        note = f"{crew_id} held at {at} for the return"
+
+    elif action == "recrew_local":
+        next_duty = _next_duty_for(state, crew_id)
+        replacement = next(
+            (c for c in state["crew"] if c["id"] == opt.get("replacement_crew_id")), None)
+        if not next_duty or not replacement:
+            return {"ok": False, "applied": False, "reason": "Local crew no longer available."}
+        _release_crew_from_future_sectors(state, crew_id)
+        assign_crew(state, next_duty["id"], replacement["id"])
+        replacement["status"] = "on_duty"
+        note = f"{replacement['id']} took {next_duty['callsign']} at {at}; {crew_id} released"
+
+    elif action == "night_stop":
+        crew["station"] = at
+        crew["hotac_nights"] = crew.get("hotac_nights", 0) + 1
+        crew["status"] = "rest"
+        _release_crew_from_future_sectors(state, crew_id)
+        note = f"{crew_id} night-stopping at {at}, released to rest"
+
+    crew["disposition"] = {"action": action, "at": at, "ts": state["clock"]}
+    state["kpis"]["cost_usd"] += cost
+    if action in ("hold_downroute", "night_stop"):
+        state["kpis"]["hotac_usd"] = state["kpis"].get("hotac_usd", 0) + cost
+    state["decisions_log"].append({
+        "ts": state["clock"], "incident_id": f"DISPOSITION {crew_id}",
+        "action": f"disposition_{action}", "cost_usd": cost, "otp_hit": 0,
+        "flight_callsign": None, "incident_type": "CREW_DISPOSITION",
+    })
+    reactionary = _log_cascade(state, propagate_reactionary_delays(state),
+                               f"disposition_{action}", crew_id)
+    _recompute_kpis(state)
+    return {"ok": True, "applied": True, "crew_id": crew_id, "action": action,
+            "cost_usd": cost, "note": note, "reactionary_delays": reactionary,
+            "kpis": state["kpis"]}
+
+
+def _release_crew_from_future_sectors(state: dict, crew_id: str) -> None:
+    """Take a crew off everything they have not yet operated."""
+    for f in state["flights"]:
+        if f["status"] in ("landed", "cancelled", "airborne"):
+            continue
+        if crew_id in f.get("assigned_crew_ids", []):
+            f["assigned_crew_ids"].remove(crew_id)
+    crew = next((c for c in state["crew"] if c["id"] == crew_id), None)
+    if crew:
+        crew["assigned_flight_id"] = None
+
+
 def crew_duty_clock(state: dict, crew_id: str) -> dict | None:
     """Live duty picture for one crew member: how much FDP their current
     pairing will consume at the delays standing right now, what their cap is,
@@ -4166,6 +4484,7 @@ def restart_day(state: dict) -> dict:
         "pax_disrupted": 0,
         "reactionary_min": 0,
         "duty_of_care_usd": 0,
+        "hotac_usd": 0,
         "discretion_used_count": 0,
         "discretion_reports": 0,
         "delay_cost_usd": 0,
