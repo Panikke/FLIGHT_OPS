@@ -138,14 +138,18 @@ def test_resolved_or_departed_incident_never_escalates():
     assert inc_res["escalated"] is False
 
 
-def test_escalation_makes_mel_deferral_infeasible():
-    # MEL deferral is minor-only; after escalation to major it must be closed.
+def test_escalation_makes_tech_incident_aircraft_decision_only():
+    # MEL deferral is minor-only; once an unattended TECH incident escalates
+    # to major, it's no longer deferrable — the tail is grounded, the only
+    # queue-resolvable option is cancel, and the sim clock freezes until the
+    # player fixes it (cancel, or reassign via Aircraft Control).
     f = _flight("EGW100", "12:00")
     inc = _incident(f, "2026-06-12T08:00:00+00:00", kind="TECH")
     state = _state([f], "2026-06-12T10:00:00+00:00", incidents=[inc])
     sim.tick(state, minutes=30)
-    mel = next(o for o in inc["options"] if o["action"] == "mel_defer")
-    assert mel["feasible"] is False
+    assert {o["action"] for o in inc["options"]} == {"cancel"}
+    assert inc["requires_aircraft_decision"] is True
+    assert sim.is_clock_paused(state) is True
 
 
 # ---- EU261-style compensation ----

@@ -1,3 +1,5 @@
+import WarningBlock from "./WarningBlock";
+import useModalDialog from "../lib/useModalDialog";
 import React, { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 
@@ -8,6 +10,7 @@ export default function AssignModal({ state, flight, onClose, onAssigned }) {
     const [warnings, setWarnings] = useState([]);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState(null);
+    const dialogRef = useModalDialog(onClose);
 
     const candidates = useMemo(() => {
         const typeQ = flight.required_crew.type_qual;
@@ -91,10 +94,18 @@ export default function AssignModal({ state, flight, onClose, onAssigned }) {
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center backdrop-blur-md bg-black/80" data-testid="assign-modal">
-            <div className="panel w-[1100px] max-w-[96vw] h-[85vh] flex flex-col" style={{ borderTop: "2px solid var(--status-info)" }}>
+            <div
+                ref={dialogRef}
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="assign-modal-title"
+                tabIndex={-1}
+                className="panel w-[1100px] max-w-[96vw] h-[85vh] flex flex-col"
+                style={{ borderTop: "2px solid var(--status-info)" }}
+            >
                 <div className="px-5 py-3 border-b border-white/10 flex items-center gap-4">
                     <div>
-                        <div className="label-key">CREW PAIRING</div>
+                        <div className="label-key" id="assign-modal-title">CREW PAIRING</div>
                         <div className="font-azeret text-lg">
                             {flight.callsign} · {flight.origin} → {flight.destination} · {flight.aircraft_type} ({flight.aircraft_reg})
                         </div>
@@ -240,17 +251,7 @@ export default function AssignModal({ state, flight, onClose, onAssigned }) {
                                 </div>
                             )}
                             {warnings.map((w, idx) => (
-                                <div
-                                    key={idx}
-                                    className={`border-l-2 mb-3 pl-3 py-1 ${w.severity === "critical" ? "border-[var(--status-critical)]" : "border-[var(--status-warning)]"}`}
-                                    data-testid={`warning-${w.code}`}
-                                >
-                                    <div className={`font-mono-jb text-xs uppercase tracking-widest ${w.severity === "critical" ? "t-crit" : "t-warn"}`}>
-                                        [{w.severity.toUpperCase()}] {w.code}
-                                    </div>
-                                    <div className="mt-1">{w.message}</div>
-                                    <div className="uppercase-wide t-muted mt-1">REF: {w.rule_ref}</div>
-                                </div>
+                                <WarningBlock key={idx} warning={w} testIdPrefix="warning" />
                             ))}
                             {error && <div className="t-crit font-mono-jb text-xs mt-2">ERR: {error}</div>}
                         </div>

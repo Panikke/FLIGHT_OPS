@@ -34,6 +34,9 @@ logger = logging.getLogger("occ.api")
 class AssignReq(BaseModel):
     crew_id: str
     force: bool = False
+    # Commander's discretion (ORO.FTL.205(f)) — legal within its cap, unlike
+    # `force`, which books a real legality breach.
+    discretion: bool = False
 
 
 class TickReq(BaseModel):
@@ -58,11 +61,25 @@ class AircraftReq(BaseModel):
     reg: str
 
 
+class ResetToZeroReq(BaseModel):
+    pairing_ids: list[str]
+
+
 # ---------------- DB helpers ---------------- #
 async def _load(game_id: str) -> dict:
     doc = await db.games.find_one({"id": game_id}, {"_id": 0})
     if not doc:
         raise HTTPException(status_code=404, detail="Game not found")
+    # Engine constants the UI needs in order to show the player the same
+    # thresholds the rules use — injected on every read so a saved game can
+    # never drift from the engine it is running on.
+    doc["config"] = {
+        "escalation_after_min": sim.ESCALATION_AFTER_MIN,
+        "escalation_extra_delay_min": sim.ESCALATION_EXTRA_DELAY_MIN,
+        "min_turnaround_min": sim.MIN_TURNAROUND_MIN,
+        "delay_cost_per_min_usd": sim.DELAY_COST_PER_MIN_USD,
+        "target_completion_factor_pct": sim.TARGET_COMPLETION_FACTOR_PCT,
+    }
     return doc
 
 
@@ -97,6 +114,21 @@ async def get_state(game_id: str):
 async def roster_status(game_id: str):
     state = await _load(game_id)
     return sim.roster_completeness(state)
+
+
+@api_router.get("/sim/{game_id}/irregularities")
+async def irregularities(game_id: str):
+    """The problem monitor: what is wrong right now by the rules, as opposed
+    to what has happened to the player by chance."""
+    state = await _load(game_id)
+    full = sim.crew_irregularities_full(state)
+    items = full["irregularities"]
+    return {
+        **full,
+        "critical": sum(1 for i in items if i["severity"] == "critical"),
+        "warning": sum(1 for i in items if i["severity"] == "warning"),
+        "advisory": sum(1 for i in items if i["severity"] == "advisory"),
+    }
 
 
 @api_router.get("/sim/{game_id}/crew_roster")
@@ -139,9 +171,44 @@ async def assign_aircraft(game_id: str, pairing_id: str, body: AircraftReq):
         # swap that removed its cause.
         if state.get("phase") == "OPS":
             sim.reset_reactionary_delays(state)
-            result["reactionary_delays"] = sim.propagate_reactionary_delays(state)
+            result["reactionary_delays"] = sim._log_cascade(
+                state, sim.propagate_reactionary_delays(state), "aircraft_change", pairing_id)
             sim._recompute_kpis(state)
             result["kpis"] = state["kpis"]
+        await _save(state)
+    return result
+
+
+@api_router.post("/sim/{game_id}/check_ferry/{pairing_id}")
+async def check_ferry(game_id: str, pairing_id: str, body: AircraftReq):
+    state = await _load(game_id)
+    # Superset of the old {warnings, has_critical} shape — also carries the
+    # positioning flight's route and what it will cost, so the desk can price
+    # the ferry before dispatching it.
+    return sim.preview_ferry(state, pairing_id, body.reg)
+
+
+@api_router.post("/sim/{game_id}/ferry_aircraft/{pairing_id}")
+async def ferry_aircraft(game_id: str, pairing_id: str, body: AircraftReq):
+    state = await _load(game_id)
+    result = sim.ferry_spare_aircraft(state, pairing_id, body.reg)
+    if result.get("applied"):
+        result["kpis"] = state["kpis"]
+        await _save(state)
+    return result
+
+
+@api_router.post("/sim/{game_id}/preview_reset_to_zero")
+async def preview_reset_to_zero(game_id: str, body: ResetToZeroReq):
+    state = await _load(game_id)
+    return sim.preview_reset_to_zero(state, body.pairing_ids)
+
+
+@api_router.post("/sim/{game_id}/reset_to_zero")
+async def reset_to_zero(game_id: str, body: ResetToZeroReq):
+    state = await _load(game_id)
+    result = sim.reset_to_zero(state, body.pairing_ids)
+    if result.get("applied"):
         await _save(state)
     return result
 
@@ -150,13 +217,18 @@ async def assign_aircraft(game_id: str, pairing_id: str, body: AircraftReq):
 async def precheck(game_id: str, flight_id: str, body: AssignReq):
     state = await _load(game_id)
     warnings = sim.check_assignment(state, flight_id, body.crew_id)
-    return {"warnings": warnings, "has_critical": any(w["severity"] == "critical" for w in warnings)}
+    # The desk needs to know whether the commander could legally take this on
+    # discretion before it offers a blanket override.
+    return {"warnings": warnings,
+            "has_critical": any(w["severity"] == "critical" for w in warnings),
+            "discretion": sim.discretion_available(state, flight_id, body.crew_id)}
 
 
 @api_router.post("/sim/{game_id}/assign/{flight_id}")
 async def assign(game_id: str, flight_id: str, body: AssignReq):
     state = await _load(game_id)
-    result = sim.assign_crew(state, flight_id, body.crew_id, force=body.force)
+    result = sim.assign_crew(state, flight_id, body.crew_id, force=body.force,
+                             discretion=body.discretion)
     if result["applied"]:
         await _save(state)
     return result
@@ -248,7 +320,7 @@ async def advisor(game_id: str, body: AdvisorReq):
         anthropic_client = AsyncAnthropic(api_key=api_key)
         import json
         response = await anthropic_client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-5",
             max_tokens=1024,
             system=(
                 "You are 'OPS-ADVISOR', a senior airline operations control supervisor at Eaglewing International "
@@ -277,14 +349,25 @@ async def advisor(game_id: str, body: AdvisorReq):
         return {"ok": True, "response": text, "summary": summary}
     except Exception as exc:
         logger.exception("Advisor failure")
-        # Graceful fallback so UI never breaks
+        # Graceful fallback so the UI never breaks — but name the cause. A
+        # missing API key used to render identically to a broken feature.
+        missing_key = not os.environ.get("ANTHROPIC_API_KEY")
+        if missing_key:
+            reason = (
+                ">> SYS_MSG: OPS-ADVISOR OFFLINE — no ANTHROPIC_API_KEY configured. "
+                "Add a key to backend/.env and restart the backend to bring the advisor online."
+            )
+        else:
+            reason = f">> SYS_MSG: OPS-ADVISOR OFFLINE — {exc}"
         return JSONResponse(
             status_code=200,
             content={
                 "ok": False,
                 "error": str(exc),
+                "offline_reason": "missing_api_key" if missing_key else "upstream_error",
                 "response": (
-                    ">> SYS_MSG: Advisor offline. Recommend: triage open incidents by severity, "
+                    f"{reason}"
+                    "\n\nFALLBACK GUIDANCE: triage open incidents by severity, "
                     "call out standby for crew gaps, accept short delays before cancellations, "
                     "and verify FDP/rest before any swap."
                 ),

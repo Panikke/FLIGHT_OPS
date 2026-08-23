@@ -72,6 +72,9 @@ export default function Debrief({ state, onNewGame, onNextDay, nextDayBusy }) {
                     <Stat label="FATIGUE INDEX" value={k.fatigue_index} tone={k.fatigue_index < 40 ? "t-nominal" : k.fatigue_index < 70 ? "t-warn" : "t-crit"} />
                     <Stat label="OPS COST USD" value={`$${k.cost_usd.toLocaleString()}`} tone="t-warn" />
                     <Stat label="EU261 COMP" value={`$${(k.compensation_usd || 0).toLocaleString()}`} tone={!k.compensation_usd ? "t-nominal" : "t-crit"} />
+                    <Stat label="ART.9 CARE" value={`$${(k.duty_of_care_usd || 0).toLocaleString()}`} tone={!k.duty_of_care_usd ? "t-nominal" : "t-warn"} />
+                    <Stat label="DELAY COST USD" value={`$${(k.delay_cost_usd || 0).toLocaleString()}`} tone={!k.delay_cost_usd ? "t-nominal" : "t-crit"} />
+                    <Stat label="COMPLETION FACTOR" value={`${(k.completion_factor_pct ?? 100).toFixed(1)}%`} tone={(k.completion_factor_pct ?? 100) >= 98 ? "t-nominal" : "t-crit"} />
                     <Stat label="PAX DISRUPTED" value={k.pax_disrupted} tone="t-warn" />
                     <Stat label="CANCELLATIONS" value={cancellations} tone={cancellations === 0 ? "t-nominal" : "t-crit"} />
                 </div>
@@ -132,7 +135,8 @@ export default function Debrief({ state, onNewGame, onNextDay, nextDayBusy }) {
                                     <th className="text-left py-1 pr-3 border-b border-white/10">A/C</th>
                                     <th className="text-right py-1 pr-3 border-b border-white/10">STD</th>
                                     <th className="text-right py-1 pr-3 border-b border-white/10">BLK</th>
-                                    <th className="text-right py-1 pr-3 border-b border-white/10">DELAY</th>
+                                    <th className="text-right py-1 pr-3 border-b border-white/10" title="Delay from the flight's own cause">PRIMARY</th>
+                                    <th className="text-right py-1 pr-3 border-b border-white/10" title="Knock-on from a late inbound — IATA delay code 93">KNOCK-ON</th>
                                     <th className="text-right py-1 pr-3 border-b border-white/10">PAX</th>
                                     <th className="text-right py-1 pr-3 border-b border-white/10">CREW</th>
                                     <th className="text-left py-1 border-b border-white/10">STATUS</th>
@@ -145,6 +149,10 @@ export default function Debrief({ state, onNewGame, onNextDay, nextDayBusy }) {
                                         const req = f.required_crew;
                                         const need = req.CP + req.FO + req.SC + req.CC;
                                         const crewOk = f.assigned_crew_ids.length >= need;
+                                        // IATA splits these for a reason: primary delay is a
+                                        // shock, reactionary (code 93) is a scheduling failure.
+                                        const knockOn = f.reactionary_min || 0;
+                                        const primary = Math.max(0, (f.delay_min || 0) - knockOn);
                                         const stTone =
                                             f.status === "cancelled" || f.status === "diverted"
                                                 ? "t-crit"
@@ -172,8 +180,11 @@ export default function Debrief({ state, onNewGame, onNextDay, nextDayBusy }) {
                                                 <td className="py-1 pr-3 text-right t-sec">
                                                     {Math.floor(f.block_min / 60)}h{(f.block_min % 60).toString().padStart(2, "0")}
                                                 </td>
-                                                <td className={`py-1 pr-3 text-right ${f.delay_min > 0 ? "t-warn" : "t-muted"}`}>
-                                                    {f.delay_min > 0 ? `+${f.delay_min}m` : "—"}
+                                                <td className={`py-1 pr-3 text-right ${primary > 0 ? "t-warn" : "t-muted"}`}>
+                                                    {primary > 0 ? `+${primary}m` : "—"}
+                                                </td>
+                                                <td className={`py-1 pr-3 text-right ${knockOn > 0 ? "t-crit" : "t-muted"}`}>
+                                                    {knockOn > 0 ? `+${knockOn}m` : "—"}
                                                 </td>
                                                 <td className="py-1 pr-3 text-right t-sec">{f.pax_count}</td>
                                                 <td className={`py-1 pr-3 text-right ${crewOk ? "t-nominal" : "t-crit"}`}>
@@ -195,8 +206,26 @@ export default function Debrief({ state, onNewGame, onNextDay, nextDayBusy }) {
                         {dec.map((d, i) => (
                             <div key={i} className="flex gap-4 py-1 border-b border-white/[0.04]">
                                 <span className="t-muted">{d.ts.slice(11, 16)}Z</span>
-                                <span className="t-info">{d.incident_id}</span>
+                                <span className="t-info">{d.flight_callsign || d.incident_id}</span>
                                 <span>{d.action.toUpperCase()}</span>
+                                {d.verdict && (
+                                    <span
+                                        className={
+                                            d.verdict === "OPTIMAL"
+                                                ? "t-nominal"
+                                                : d.verdict === "GOOD"
+                                                  ? "t-info"
+                                                  : "t-warn"
+                                        }
+                                    >
+                                        {d.verdict}
+                                    </span>
+                                )}
+                                {d.reactionary_caused_min > 0 && (
+                                    <span className="t-crit" title="Knock-on delay this decision put into the network">
+                                        +{d.reactionary_caused_min}m NETWORK
+                                    </span>
+                                )}
                                 <span className="t-warn ml-auto">${d.cost_usd?.toLocaleString() || 0}</span>
                             </div>
                         ))}

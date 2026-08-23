@@ -36,10 +36,18 @@ export default function HeaderBar({
     speed,
     onTogglePlay,
     onChangeSpeed,
+    pausedForAircraft,
 }) {
     if (!state) return null;
     const k = state.kpis;
     const otpTone = k.otp_pct >= 85 ? "good" : k.otp_pct >= 70 ? "warn" : "crit";
+    // Completion factor is a separate number from OTP: a cancelled sector is
+    // not a late sector. Real carriers live in the high nineties.
+    const cf = k.completion_factor_pct ?? 100;
+    const cfTone = cf >= 98 ? "good" : cf >= 94 ? "warn" : "crit";
+    // Knock-on minutes are the currency every recovery lever trades in.
+    const reactionaryMin = k.reactionary_min ?? 0;
+    const reactionaryTone = reactionaryMin === 0 ? "good" : reactionaryMin < 240 ? "warn" : "crit";
     const breachTone = k.legality_breaches === 0 ? "good" : k.legality_breaches < 3 ? "warn" : "crit";
     const fatigueTone = k.fatigue_index < 40 ? "good" : k.fatigue_index < 70 ? "warn" : "crit";
 
@@ -55,7 +63,21 @@ export default function HeaderBar({
                 </div>
             </div>
 
-            <Kpi label="ZULU CLOCK" value={fmtClock(state.clock)} sub={playing ? `▶ PLAY ${["", "1×", "2×", "5×", "15×"][speed] || ""}` : state.phase === "OPS" ? "PAUSED" : ""} tone="info" testid="kpi-clock" />
+            <Kpi
+                label="ZULU CLOCK"
+                value={fmtClock(state.clock)}
+                sub={
+                    pausedForAircraft
+                        ? "⛔ GROUNDED — DECISION REQUIRED"
+                        : playing
+                          ? `▶ PLAY ${["", "1×", "2×", "5×", "15×"][speed] || ""}`
+                          : state.phase === "OPS"
+                            ? "PAUSED"
+                            : ""
+                }
+                tone={pausedForAircraft ? "crit" : "info"}
+                testid="kpi-clock"
+            />
             <Kpi label="OTP%" value={`${k.otp_pct.toFixed(0)}`} sub="ON-TIME PERFORMANCE" tone={otpTone} testid="kpi-otp" />
             <Kpi
                 label="BREACHES"
@@ -65,6 +87,20 @@ export default function HeaderBar({
                 testid="kpi-breach"
             />
             <Kpi label="FATIGUE IDX" value={k.fatigue_index} sub="FLEET AVG" tone={fatigueTone} testid="kpi-fatigue" />
+            <Kpi
+                label="COMPL. FACTOR"
+                value={`${cf.toFixed(0)}`}
+                sub="SECTORS OPERATED"
+                tone={cfTone}
+                testid="kpi-completion"
+            />
+            <Kpi
+                label="KNOCK-ON"
+                value={`${reactionaryMin}m`}
+                sub={`REACTIONARY · $${((k.delay_cost_usd ?? 0) / 1000).toFixed(0)}k`}
+                tone={reactionaryTone}
+                testid="kpi-reactionary"
+            />
             <Kpi label="COST USD" value={`${(k.cost_usd / 1000).toFixed(1)}k`} sub="OPS COST" tone="warn" testid="kpi-cost" />
             <Kpi label="PAX DISR." value={k.pax_disrupted} sub="PASSENGERS" tone="warn" testid="kpi-pax" />
             <Kpi label="SCORE" value={k.score} sub="DUTY POINTS" tone={k.score > 700 ? "good" : k.score > 400 ? "warn" : "crit"} testid="kpi-score" />
@@ -74,11 +110,16 @@ export default function HeaderBar({
             <div className="flex items-center gap-2 px-4 py-2 border-l border-t border-white/10 flex-wrap">
                 {state.phase === "OPS" && (
                     <>
+                        {pausedForAircraft && (
+                            <span className="badge t-crit" data-testid="paused-for-aircraft-badge">
+                                ⛔ CLOCK FROZEN — RESOLVE THE GROUNDED TAIL
+                            </span>
+                        )}
                         <button
                             data-testid="speed-down-btn"
                             className="btn"
                             onClick={() => onChangeSpeed(Math.max(1, speed - 1))}
-                            disabled={speed <= 1}
+                            disabled={speed <= 1 || pausedForAircraft}
                             title="Slower"
                             aria-label="Decrease simulation speed"
                         >
@@ -89,14 +130,16 @@ export default function HeaderBar({
                             className={`btn ${playing ? "btn-warn" : "btn-ok"}`}
                             onClick={onTogglePlay}
                             aria-pressed={playing}
+                            disabled={pausedForAircraft}
                         >
                             {playing ? "⏸ PAUSE" : "▶ PLAY"}
+                            <span className="t-muted ml-2" aria-hidden="true">␣</span>
                         </button>
                         <button
                             data-testid="speed-up-btn"
                             className="btn"
                             onClick={() => onChangeSpeed(Math.min(4, speed + 1))}
-                            disabled={speed >= 4}
+                            disabled={speed >= 4 || pausedForAircraft}
                             title="Faster"
                             aria-label="Increase simulation speed"
                         >
@@ -115,6 +158,7 @@ export default function HeaderBar({
                                     onClick={() => onChangeSpeed(s.id)}
                                     aria-pressed={speed === s.id}
                                     aria-label={`Set speed to ${s.label}`}
+                                    disabled={pausedForAircraft}
                                     className={`font-mono-jb uppercase text-[11px] tracking-widest px-3 py-2 border-r border-white/10 last:border-r-0 focus-ring-inset cursor-pointer ${
                                         speed === s.id
                                             ? "bg-[var(--status-info)] text-black"
@@ -129,23 +173,25 @@ export default function HeaderBar({
                             data-testid="tick-15-btn"
                             className="btn"
                             onClick={() => onTick(15)}
-                            disabled={ticking}
+                            disabled={ticking || pausedForAircraft}
                         >
                             +15M
+                            <span className="t-muted ml-2" aria-hidden="true">[</span>
                         </button>
                         <button
                             data-testid="tick-30-btn"
                             className="btn"
                             onClick={() => onTick(30)}
-                            disabled={ticking}
+                            disabled={ticking || pausedForAircraft}
                         >
                             +30M
+                            <span className="t-muted ml-2" aria-hidden="true">]</span>
                         </button>
                         <button
                             data-testid="tick-60-btn"
                             className="btn"
                             onClick={() => onTick(60)}
-                            disabled={ticking}
+                            disabled={ticking || pausedForAircraft}
                         >
                             +60M
                         </button>
