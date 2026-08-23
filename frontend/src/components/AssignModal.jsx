@@ -8,6 +8,11 @@ export default function AssignModal({ state, flight, onClose, onAssigned }) {
     const [search, setSearch] = useState("");
     const [selected, setSelected] = useState(null);
     const [warnings, setWarnings] = useState([]);
+    // Whether the commander could legally take this on discretion. The engine
+    // has computed it since the FDP work landed; the roster desk had no way to
+    // act on it, so the only route past an FDP-only critical was OVERRIDE —
+    // which books a breach for something that is not one.
+    const [discretion, setDiscretion] = useState(null);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState(null);
     const dialogRef = useModalDialog(onClose);
@@ -37,7 +42,9 @@ export default function AssignModal({ state, flight, onClose, onAssigned }) {
         }
         let cancelled = false;
         api.precheck(state.id, flight.id, selected).then((d) => {
-            if (!cancelled) setWarnings(d.warnings || []);
+            if (cancelled) return;
+            setWarnings(d.warnings || []);
+            setDiscretion(d.discretion || null);
         }).catch(() => {});
         return () => {
             cancelled = true;
@@ -46,12 +53,13 @@ export default function AssignModal({ state, flight, onClose, onAssigned }) {
 
     const hasCritical = warnings.some((w) => w.severity === "critical");
 
-    async function doAssign(force = false) {
+    async function doAssign(force = false, useDiscretion = false) {
         if (!selected) return;
         setBusy(true);
         setError(null);
         try {
-            const res = await api.assign(state.id, flight.id, selected, force);
+            const res = await api.assign(
+                state.id, flight.id, selected, force, useDiscretion);
             if (!res.applied) {
                 setWarnings(res.warnings);
                 return;
@@ -265,6 +273,19 @@ export default function AssignModal({ state, flight, onClose, onAssigned }) {
                             >
                                 {busy ? "..." : "ASSIGN"}
                             </button>
+                            {hasCritical && discretion?.available && (
+                                <button
+                                    data-testid="assign-discretion-btn"
+                                    className="btn btn-warn"
+                                    disabled={!selected || busy}
+                                    onClick={() => doAssign(false, true)}
+                                    title="ORO.FTL.205(f): the commander may extend the FDP in unforeseen circumstances arising after report. Legal, capped, and reportable."
+                                >
+                                    {busy
+                                        ? "..."
+                                        : `COMMANDER'S DISCRETION +${discretion.overrun_min}M`}
+                                </button>
+                            )}
                             {hasCritical && (
                                 <button
                                     data-testid="assign-force-btn"
@@ -274,6 +295,20 @@ export default function AssignModal({ state, flight, onClose, onAssigned }) {
                                 >
                                     OVERRIDE
                                 </button>
+                            )}
+                            {hasCritical && discretion && !discretion.available && discretion.reason && (
+                                <span className="uppercase-wide t-muted">
+                                    No discretion: {discretion.reason}
+                                </span>
+                            )}
+                            {hasCritical && discretion?.available && (
+                                <span className="uppercase-wide t-warn">
+                                    Discretion is legal here — capped at {discretion.cap_min}min
+                                    {discretion.reportable
+                                        ? ", CAA-reportable within 28 days"
+                                        : ""}
+                                    . OVERRIDE books a breach instead.
+                                </span>
                             )}
                         </div>
                     </div>

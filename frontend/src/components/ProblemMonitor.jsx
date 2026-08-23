@@ -93,9 +93,14 @@ export default function ProblemMonitor({ state, onOpenCrew }) {
         return () => {
             cancelled = true;
         };
-        // Re-read whenever the operation moves: the clock, the roster, or the
-        // incident list changing can all create or clear an irregularity.
-    }, [state.id, state.clock, state.phase, state.incidents?.length]);
+        // Re-read whenever the server state has been re-read.
+        //
+        // Keying off the clock and the incident COUNT missed the common case:
+        // resolving an incident or filling a gap changes neither, so an
+        // OPEN_SECTOR stayed on screen after a standby callout had already
+        // covered it, until the next tick. App replaces `state` on every
+        // refresh, so its identity is the honest signal that something moved.
+    }, [state]);
 
     if (!items.length) return null;
 

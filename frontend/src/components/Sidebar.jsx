@@ -7,7 +7,7 @@ export const NAV = [
     { id: "incidents", label: "INCIDENTS", key: "4" },
     { id: "crew", label: "CREW", key: "5" },
     { id: "disposition", label: "DISPOSITION", key: "9" },
-    { id: "calendar", label: "DAYS OFF", key: "6" },
+    { id: "calendar", label: "ROSTER PLANNER", key: "6" },
     { id: "advisor", label: "OPS ADVISOR", key: "7" },
     { id: "regs", label: "FTL REGS", key: "8" },
 ];

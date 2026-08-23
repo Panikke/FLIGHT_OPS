@@ -135,6 +135,18 @@ async def irregularities(game_id: str):
     }
 
 
+@api_router.get("/sim/{game_id}/open_time")
+async def open_time(game_id: str):
+    """Uncovered flying, with the legal candidates for each open rank."""
+    state = await _load(game_id)
+    rows = sim.open_time(state)
+    return {
+        "open_time": rows,
+        "sectors": len(rows),
+        "positions": sum(r["short_by"] for r in rows),
+    }
+
+
 @api_router.get("/sim/{game_id}/crew_disposition")
 async def crew_disposition(game_id: str):
     """The disposition desk: every crew who is not where they need to be, and
@@ -209,6 +221,22 @@ async def assign_aircraft(game_id: str, pairing_id: str, body: AircraftReq):
                 state, sim.propagate_reactionary_delays(state), "aircraft_change", pairing_id)
             sim._recompute_kpis(state)
             result["kpis"] = state["kpis"]
+        await _save(state)
+    return result
+
+
+@api_router.post("/sim/{game_id}/check_substitution/{pairing_id}")
+async def check_substitution(game_id: str, pairing_id: str, body: AircraftReq):
+    """Price and gate covering a rotation with an off-type tail (upgauge)."""
+    state = await _load(game_id)
+    return sim.preview_substitute_aircraft(state, pairing_id, body.reg)
+
+
+@api_router.post("/sim/{game_id}/substitute_aircraft/{pairing_id}")
+async def substitute_aircraft(game_id: str, pairing_id: str, body: AircraftReq):
+    state = await _load(game_id)
+    result = sim.substitute_aircraft(state, pairing_id, body.reg)
+    if result.get("applied"):
         await _save(state)
     return result
 

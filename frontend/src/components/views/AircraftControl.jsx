@@ -357,7 +357,22 @@ function ReassignModal({ state, rotation, fleet, minTurn = 45, hub = "LHR", onCl
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState(null);
     const [grade, setGrade] = useState(null);
+    // Off-type tails, priced. The fleet grid above this modal already SHOWS
+    // idle widebody spares, so a player could see two aircraft they were not
+    // allowed to touch and no hint that anything else existed.
+    const [subOptions, setSubOptions] = useState({});
+    const [showSubFleet, setShowSubFleet] = useState(false);
     const dialogRef = useModalDialog(onClose);
+
+    // Off-type tails that could cover this rotation at a price. Upgauge only —
+    // a smaller aircraft cannot absorb a bigger one's passengers.
+    const subFleet = useMemo(
+        () =>
+            fleet.filter(
+                (ac) => ac.type !== rotation.aircraft_type && ac.reg !== rotation.aircraft_reg
+            ),
+        [fleet, rotation]
+    );
 
     // Same-type tails other than the current one, spares first, then by load.
     const candidates = useMemo(() => {
@@ -407,6 +422,50 @@ function ReassignModal({ state, rotation, fleet, minTurn = 45, hub = "LHR", onCl
             cancelled = true;
         };
     }, [selected, state.id, rotation.pairing_id]);
+
+    // Priced lazily: this is several round-trips and most reassignments never
+    // need it.
+    useEffect(() => {
+        if (!showSubFleet) return undefined;
+        let cancelled = false;
+        Promise.all(
+            subFleet.map((ac) =>
+                api
+                    .checkSubstitution(state.id, rotation.pairing_id, ac.reg)
+                    .then((d) => [ac.reg, d])
+                    .catch(() => [ac.reg, null])
+            )
+        ).then((pairs) => {
+            if (!cancelled) setSubOptions(Object.fromEntries(pairs));
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [showSubFleet, subFleet, state.id, rotation.pairing_id]);
+
+    async function doSubstitute(reg) {
+        setBusy(true);
+        setError(null);
+        try {
+            const res = await api.substituteAircraft(state.id, rotation.pairing_id, reg);
+            if (!res.applied) {
+                setError(
+                    (res.warnings || []).find((w) => w.severity === "critical")?.message ||
+                        "Substitution refused."
+                );
+                return;
+            }
+            if (res.decision_grade) {
+                setGrade({ ...res.decision_grade, substitution: res });
+            } else {
+                onAssigned();
+            }
+        } catch (e) {
+            setError(String(e));
+        } finally {
+            setBusy(false);
+        }
+    }
 
     const hasCritical = warnings.some((w) => w.severity === "critical");
     const ferryHasCritical = (ferryWarnings || []).some((w) => w.severity === "critical");
@@ -531,6 +590,80 @@ function ReassignModal({ state, rotation, fleet, minTurn = 45, hub = "LHR", onCl
                     {candidates.length === 0 && (
                         <div className="t-muted font-mono-jb text-xs">
                             No other {rotation.aircraft_type} in the fleet.
+                        </div>
+                    )}
+                    {subFleet.length > 0 && (
+                        <div className="mt-4" data-testid="sub-fleet-section">
+                            <button
+                                className="label-key flex items-baseline gap-1.5"
+                                onClick={() => setShowSubFleet((v) => !v)}
+                                aria-expanded={showSubFleet}
+                                data-testid="sub-fleet-toggle"
+                            >
+                                <span aria-hidden="true">{showSubFleet ? "▾" : "▸"}</span>
+                                SUB-FLEET OPTIONS ({subFleet.length})
+                            </button>
+                            {showSubFleet && (
+                                <div className="mt-2 flex flex-col gap-2">
+                                    {subFleet.map((ac) => {
+                                        const pv = subOptions[ac.reg];
+                                        const blocked = pv?.warnings?.find(
+                                            (w) => w.severity === "critical"
+                                        );
+                                        const ci = pv?.crew_impact;
+                                        return (
+                                            <div
+                                                key={ac.reg}
+                                                className="border border-white/15 px-3 py-2 font-mono-jb text-xs"
+                                                data-testid={`sub-cand-${ac.reg}`}
+                                            >
+                                                <div className="flex items-center gap-3 flex-wrap">
+                                                    <span className="t-info">{ac.reg}</span>
+                                                    <span className="t-muted">{ac.type}</span>
+                                                    {pv && !blocked && (
+                                                        <>
+                                                            <span className="t-warn">
+                                                                ${pv.cost_usd.toLocaleString()}
+                                                            </span>
+                                                            <span className="t-muted">
+                                                                {pv.seats_from}→{pv.seats_to} seats ·
+                                                                upgauge
+                                                            </span>
+                                                            <button
+                                                                className="btn btn-primary ml-auto"
+                                                                disabled={busy || !ci?.crewable}
+                                                                onClick={() => doSubstitute(ac.reg)}
+                                                                data-testid={`substitute-${ac.reg}`}
+                                                            >
+                                                                {busy ? "…" : "SUBSTITUTE"}
+                                                            </button>
+                                                        </>
+                                                    )}
+                                                    {!pv && (
+                                                        <span className="t-muted">pricing…</span>
+                                                    )}
+                                                </div>
+                                                {blocked && (
+                                                    <div className="mt-1 t-crit">
+                                                        [{blocked.code}] {blocked.message}
+                                                    </div>
+                                                )}
+                                                {pv && !blocked && ci && (
+                                                    <div
+                                                        className={`mt-1 ${
+                                                            ci.crewable ? "t-muted" : "t-crit"
+                                                        }`}
+                                                    >
+                                                        {ci.crewable
+                                                            ? `Crewable: needs CP${ci.open_ranks.CP}/FO${ci.open_ranks.FO}/SC${ci.open_ranks.SC}/CC${ci.open_ranks.CC}, ${ci.stood_down.length} rostered crew stand down as not type-rated.`
+                                                            : `NOT CREWABLE: needs CP${ci.open_ranks.CP}/FO${ci.open_ranks.FO}/SC${ci.open_ranks.SC}/CC${ci.open_ranks.CC}, only CP${ci.rated_available.CP}/FO${ci.rated_available.FO}/SC${ci.rated_available.SC}/CC${ci.rated_available.CC} rated and free.`}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
                         </div>
                     )}
                     <div className="flex flex-col gap-2">

@@ -177,3 +177,57 @@ def test_ending_the_day_away_from_base_is_billed_even_if_ignored():
     assert res["hotac_usd"] > 0
     assert st["kpis"]["hotac_usd"] == res["hotac_usd"]
     assert any(c.get("hotac_nights") for c in st["crew"])
+
+
+# ------------------------------------------------------- roster planner
+
+def test_a_duty_cell_carries_the_shape_of_the_duty():
+    # "FLT" told the player nothing: an 05:00 four-sector day and a 14:00
+    # single-sector day rendered identically, though every fatigue rule in the
+    # engine distinguishes them.
+    import random
+    random.seed(2)
+    st = sim.new_game("free_play")
+    sim.auto_roster(st)
+    sim.start_day(st)
+    roster = sim.crew_roster(st)
+    cell = next(
+        c for row in roster["crew"] for c in row["cells"] if c.get("route")
+    )
+    assert cell["code"] == "FLT"
+    assert cell["route"].count("-") >= 1
+    assert len(cell["report_z"]) == 5 and len(cell["off_duty_z"]) == 5
+    assert cell["sectors"] >= 1
+    assert 0 < cell["fdp_min"] <= cell["fdp_cap_min"]
+    assert cell["over_cap"] is False
+
+
+def test_open_time_lists_uncovered_flying_with_who_could_take_it():
+    import random
+    random.seed(2)
+    st = sim.new_game("free_play")        # nothing rostered yet
+    rows = sim.open_time(st)
+    assert rows, "a fresh game has every sector open"
+    assert sum(r["short_by"] for r in rows) > 0
+    first = rows[0]
+    assert first["needs"]
+    # Every open rank offers legal candidates, drawn from the same legality
+    # engine the assign modal uses.
+    for rank in first["needs"]:
+        assert rank in first["candidates"]
+    assert rows == sorted(rows, key=lambda r: r["std"])
+
+
+def test_open_time_empties_once_the_roster_is_filled():
+    import random
+    random.seed(2)
+    st = sim.new_game("free_play")
+    sim.auto_roster(st)
+    assert sim.open_time(st) == []
+
+
+def test_open_time_ignores_cancelled_flying():
+    f = _flight("EGW100", "G-EAGA", "A320", "10:00", 75, "P1", crew_ids=[])
+    f["status"] = "cancelled"
+    state = _state([f], crew=[_crew("CP1", "CP", "Larsen")])
+    assert sim.open_time(state) == []

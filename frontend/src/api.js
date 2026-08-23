@@ -11,8 +11,10 @@ export const api = {
     rosterStatus: (gid) => client.get(`/sim/${gid}/roster_status`).then((r) => r.data),
     precheck: (gid, fid, crewId) =>
         client.post(`/sim/${gid}/check_assignment/${fid}`, { crew_id: crewId }).then((r) => r.data),
-    assign: (gid, fid, crewId, force = false) =>
-        client.post(`/sim/${gid}/assign/${fid}`, { crew_id: crewId, force }).then((r) => r.data),
+    assign: (gid, fid, crewId, force = false, discretion = false) =>
+        client
+            .post(`/sim/${gid}/assign/${fid}`, { crew_id: crewId, force, discretion })
+            .then((r) => r.data),
     unassign: (gid, fid, cid) =>
         client.post(`/sim/${gid}/unassign/${fid}/${cid}`).then((r) => r.data),
     startDay: (gid) => client.post(`/sim/${gid}/start_day`).then((r) => r.data),
@@ -33,6 +35,7 @@ export const api = {
     aircraftControl: (gid) => client.get(`/sim/${gid}/aircraft_control`).then((r) => r.data),
     irregularities: (gid) => client.get(`/sim/${gid}/irregularities`).then((r) => r.data),
     crewDisposition: (gid) => client.get(`/sim/${gid}/crew_disposition`).then((r) => r.data),
+    openTime: (gid) => client.get(`/sim/${gid}/open_time`).then((r) => r.data),
     disposeCrew: (gid, crewId, action) =>
         client.post(`/sim/${gid}/crew/${crewId}/dispose`, { action }).then((r) => r.data),
     previewDispose: (gid, crewId, action) =>
@@ -41,6 +44,10 @@ export const api = {
         client.post(`/sim/${gid}/check_aircraft/${pairingId}`, { reg }).then((r) => r.data),
     assignAircraft: (gid, pairingId, reg) =>
         client.post(`/sim/${gid}/assign_aircraft/${pairingId}`, { reg }).then((r) => r.data),
+    checkSubstitution: (gid, pairingId, reg) =>
+        client.post(`/sim/${gid}/check_substitution/${pairingId}`, { reg }).then((r) => r.data),
+    substituteAircraft: (gid, pairingId, reg) =>
+        client.post(`/sim/${gid}/substitute_aircraft/${pairingId}`, { reg }).then((r) => r.data),
     checkFerry: (gid, pairingId, reg) =>
         client.post(`/sim/${gid}/check_ferry/${pairingId}`, { reg }).then((r) => r.data),
     ferryAircraft: (gid, pairingId, reg) =>

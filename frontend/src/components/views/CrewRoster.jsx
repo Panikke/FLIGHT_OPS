@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback, useMemo } from "react";
 import { api } from "../../api";
+import OpenTime from "../OpenTime";
 
 // Duty-code -> status colour (var) per the design system: colour is signal.
 const CODE_VAR = {
@@ -21,6 +22,11 @@ function tint(varName, pct) {
     return `color-mix(in srgb, ${varName} ${pct}%, transparent)`;
 }
 
+function fmtHrs(min) {
+    if (min === null || min === undefined) return "—";
+    return `${Math.floor(min / 60)}h${String(min % 60).padStart(2, "0")}`;
+}
+
 function Cell({ col, cell, editable, busy, onToggle }) {
     const code = cell.code;
     const varName = code ? CODE_VAR[code] : null;
@@ -36,6 +42,17 @@ function Cell({ col, cell, editable, busy, onToggle }) {
 
     const label = code || (clickable ? "+" : "·");
 
+    // A duty line rather than a colour block. An 05:00 four-sector day and a
+    // 14:00 single-sector day rendered identically as "FLT", even though every
+    // fatigue rule in the engine distinguishes them.
+    const line = cell.route
+        ? `${cell.route}  ${cell.report_z}/${cell.off_duty_z}  ${cell.sectors} SECTOR${
+              cell.sectors === 1 ? "" : "S"
+          }  FDP ${fmtHrs(cell.fdp_min)}/${fmtHrs(cell.fdp_cap_min)}${
+              cell.fdp_delay_min ? `  (+${cell.fdp_delay_min}m delay)` : ""
+          }`
+        : null;
+
     return (
         <td className="px-1 py-1 text-center border-r border-white/[0.04]">
             <button
@@ -43,7 +60,9 @@ function Cell({ col, cell, editable, busy, onToggle }) {
                 disabled={!clickable || busy}
                 onClick={clickable ? () => onToggle(col.day, plannedOff || code === "OFF") : undefined}
                 title={
-                    clickable
+                    line
+                        ? line
+                        : clickable
                         ? plannedOff || code === "OFF"
                             ? "Clear day off"
                             : "Roster day off (free of duty)"
@@ -149,12 +168,16 @@ export default function CrewRoster({ state, onChanged }) {
     const cols = roster.columns;
 
     return (
-        <div className="h-full flex flex-col" data-testid="crew-roster">
+        // The planner is the calendar PLUS the work list you assign from —
+        // open time was computed all along and only ever surfaced as a warning
+        // string, never as something you could act on.
+        <div className="h-full flex" data-testid="crew-roster-planner">
+        <div className="flex-1 min-w-0 h-full flex flex-col" data-testid="crew-roster">
             {/* Header */}
             <div className="px-4 py-3 border-b border-white/10 flex items-center gap-4">
                 <div>
                     <div className="label-key">CREW ROSTER LINE</div>
-                    <div className="font-azeret text-lg">DAYS-OFF PLANNING · LHR BASE</div>
+                    <div className="font-azeret text-lg">ROSTER PLANNER · LHR BASE</div>
                 </div>
                 <div className="flex-1" />
                 <div className="uppercase-wide t-sec">
@@ -271,6 +294,8 @@ export default function CrewRoster({ state, onChanged }) {
                     </tbody>
                 </table>
             </div>
+        </div>
+        <OpenTime state={state} onChanged={onChanged} />
         </div>
     );
 }
