@@ -36,6 +36,10 @@ export const api = {
     irregularities: (gid) => client.get(`/sim/${gid}/irregularities`).then((r) => r.data),
     crewDisposition: (gid) => client.get(`/sim/${gid}/crew_disposition`).then((r) => r.data),
     openTime: (gid) => client.get(`/sim/${gid}/open_time`).then((r) => r.data),
+    planDuty: (gid, crewIds, days, code) =>
+        client
+            .post(`/sim/${gid}/plan_duty`, { crew_ids: crewIds, days, code })
+            .then((r) => r.data),
     disposeCrew: (gid, crewId, action) =>
         client.post(`/sim/${gid}/crew/${crewId}/dispose`, { action }).then((r) => r.data),
     previewDispose: (gid, crewId, action) =>

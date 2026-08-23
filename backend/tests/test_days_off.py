@@ -162,7 +162,10 @@ def test_crew_roster_shape_and_today_cell():
     row = r["crew"][0]
     assert len(row["cells"]) == 10
     today = next(c for c in row["cells"] if c["rel"] == "today")
-    assert today["day"] == 1 and today["code"] in ("FLT", "SBY", "AVL", "OFF", "SICK")
+    # Standby now reports its TYPE: airport standby answers in 30min with the
+    # duty clock already running, home standby in 90min but fresh.
+    assert today["day"] == 1 and today["code"] in (
+        "FLT", "SBY-A", "SBY-H", "AVL", "OFF", "SICK")
 
 
 def test_crew_roster_reflects_planned_off_in_future_cell():

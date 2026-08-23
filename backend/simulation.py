@@ -846,15 +846,28 @@ def advance_to_next_day(state: dict) -> dict:
             c["status"] = "sick"
         # Honour a pre-planned day off for the incoming day (wins over the reset
         # above, and keeps the crew out of the standby pool re-draw below).
+        planned_code = c.get("duty_plan", {}).get(str(incoming_day))
+        if planned_code in ("SBY_APT", "SBY_HOME"):
+            # The controller chose this crew as reserve cover for today.
+            c["status"] = "standby"
+            c["assigned_flight_id"] = None
+            c["standby_type"] = STANDBY_AIRPORT if planned_code == "SBY_APT" else STANDBY_HOME
+            c["standby_elapsed_hr"] = 0.0
         if incoming_day in c.get("days_off_planned", []):
             c["status"] = "off"
             c["assigned_flight_id"] = None
             c["days_off_planned"] = [d for d in c["days_off_planned"] if d != incoming_day]
+        # Consumed only once it has been acted on.
+        c.get("duty_plan", {}).pop(str(incoming_day), None)
 
     # Re-establish standby pool (~10% of pool from those still available)
     available = [c for c in state["crew"] if c["status"] == "available"]
     random.shuffle(available)
-    standby_count = 0
+    # Crew the controller planned onto standby already count toward the bank —
+    # otherwise planning reserve cover silently doubled it.
+    standby_count = sum(
+        1 for c in state["crew"]
+        if c["status"] == "standby" and c["rank"] in ("CP", "FO"))
     for c in available:
         if c["rank"] in ("CP", "FO") and standby_count < 4:
             c["status"] = "standby"
@@ -1441,7 +1454,7 @@ def _today_duty_code(state: dict, crew: dict) -> str:
     if st == "off":
         return "OFF"
     if st == "standby":
-        return "SBY"
+        return "SBY-A" if crew.get("standby_type") == STANDBY_AIRPORT else "SBY-H"
     return "AVL"   # available reserve / open
 
 
@@ -1549,11 +1562,14 @@ def crew_roster(state: dict, past_days: int = 5, future_days: int = 4) -> dict:
                     **_duty_line_for(state, c),
                 })
             else:
+                planned_code = c.get("duty_plan", {}).get(str(d))
                 cells.append({
                     "day": d,
-                    "code": "OFF" if d in planned else None,
+                    "code": ("OFF" if d in planned
+                             else {"SBY_APT": "SBY-A", "SBY_HOME": "SBY-H"}.get(planned_code)),
                     "rel": "future",
                     "planned_off": d in planned,
+                    "planned_duty": planned_code,
                 })
         rows.append({
             "crew_id": c["id"],
@@ -1579,6 +1595,84 @@ def crew_roster(state: dict, past_days: int = 5, future_days: int = 4) -> dict:
         "warn_at": DAYS_OFF_WARN_AT,
         "crew": rows,
     }
+
+
+# Duty a controller can PLAN onto a future day. Days off were the only thing
+# the planner could write, which left the standby bank — the thing that decides
+# whether tomorrow's sickness is survivable — entirely to a random draw.
+PLANNABLE_DUTIES = {
+    "OFF": "Day off (free of duty)",
+    "SBY_APT": "Airport standby — 30min to report, but the duty clock is running",
+    "SBY_HOME": "Home standby — 90min to report, fresh, erodes FDP past 6h",
+    "CLEAR": "Clear any plan; the day is open again",
+}
+
+
+def plan_duty(state: dict, crew_ids: list[str], days: list[int], code: str) -> dict:
+    """Write a planned duty onto one or more crew across one or more days.
+
+    Bulk by design: rostering a base means moving groups of people, and doing
+    it one cell at a time is not planning, it is data entry."""
+    if code not in PLANNABLE_DUTIES:
+        return {"ok": False, "error": "unknown_duty", "allowed": sorted(PLANNABLE_DUTIES)}
+    day_number = state.get("day_number", 1)
+    applied, skipped = [], []
+
+    for crew_id in crew_ids:
+        crew = next((c for c in state["crew"] if c["id"] == crew_id), None)
+        if not crew:
+            skipped.append({"crew_id": crew_id, "reason": "crew_not_found"})
+            continue
+        plan = crew.setdefault("duty_plan", {})
+        planned_off = crew.setdefault("days_off_planned", [])
+        for day in days:
+            if day < day_number:
+                skipped.append({"crew_id": crew_id, "day": day, "reason": "cannot_change_past"})
+                continue
+            if day == day_number and state.get("phase") != "ROSTER":
+                skipped.append({"crew_id": crew_id, "day": day, "reason": "day_in_progress"})
+                continue
+
+            if code == "CLEAR":
+                plan.pop(str(day), None)
+                if day in planned_off:
+                    planned_off.remove(day)
+                if day == day_number and crew["status"] in ("off", "standby"):
+                    crew["status"] = "available"
+            else:
+                plan[str(day)] = code
+                # days_off_planned stays the authoritative OFF list: the day
+                # rollover, the consecutive-duty counter and roster_completeness
+                # all read it, and they should not have to learn a second shape.
+                if code == "OFF" and day not in planned_off:
+                    planned_off.append(day)
+                elif code != "OFF" and day in planned_off:
+                    planned_off.remove(day)
+                if day == day_number:
+                    _apply_planned_duty_now(state, crew, code)
+            applied.append({"crew_id": crew_id, "day": day, "code": code})
+
+    return {"ok": True, "applied": applied, "skipped": skipped,
+            "crew_count": len({a["crew_id"] for a in applied}),
+            "day_count": len({a["day"] for a in applied})}
+
+
+def _apply_planned_duty_now(state: dict, crew: dict, code: str) -> None:
+    """Put a planned duty into effect for the current day (ROSTER phase only)."""
+    if code == "OFF":
+        for f in state["flights"]:
+            if crew["id"] in f["assigned_crew_ids"]:
+                f["assigned_crew_ids"].remove(crew["id"])
+        crew["assigned_flight_id"] = None
+        crew["status"] = "off"
+    elif code in ("SBY_APT", "SBY_HOME"):
+        for f in state["flights"]:
+            if crew["id"] in f["assigned_crew_ids"]:
+                f["assigned_crew_ids"].remove(crew["id"])
+        crew["assigned_flight_id"] = None
+        crew["status"] = "standby"
+        crew["standby_type"] = STANDBY_AIRPORT if code == "SBY_APT" else STANDBY_HOME
+        crew["standby_elapsed_hr"] = 0.0
 
 
 def set_day_off(state: dict, crew_id: str, day: int, off: bool = True) -> dict:

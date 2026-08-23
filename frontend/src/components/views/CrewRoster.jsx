@@ -88,6 +88,60 @@ export default function CrewRoster({ state, onChanged }) {
     const [acFilter, setAcFilter] = useState("ALL");
     const [search, setSearch] = useState("");
     const [busyKey, setBusyKey] = useState(null);
+    // Rostering a base means moving groups of people. Doing it one cell at a
+    // time is data entry, not planning.
+    const [selected, setSelected] = useState(() => new Set());
+    const [selectedDays, setSelectedDays] = useState(() => new Set());
+    const [bulkBusy, setBulkBusy] = useState(false);
+    const [bulkNote, setBulkNote] = useState(null);
+
+    function toggleCrew(crewId) {
+        setSelected((prev) => {
+            const next = new Set(prev);
+            if (next.has(crewId)) next.delete(crewId);
+            else next.add(crewId);
+            return next;
+        });
+    }
+
+    function toggleDay(day) {
+        setSelectedDays((prev) => {
+            const next = new Set(prev);
+            if (next.has(day)) next.delete(day);
+            else next.add(day);
+            return next;
+        });
+    }
+
+    async function applyBulk(code) {
+        if (!selected.size || !selectedDays.size) return;
+        setBulkBusy(true);
+        setBulkNote(null);
+        try {
+            const res = await api.planDuty(
+                state.id,
+                [...selected],
+                [...selectedDays],
+                code
+            );
+            if (!res.ok) {
+                setBulkNote(`Refused: ${res.error}`);
+            } else {
+                const skipped = res.skipped?.length
+                    ? ` · ${res.skipped.length} skipped (${res.skipped[0].reason})`
+                    : "";
+                setBulkNote(
+                    `${code} applied to ${res.crew_count} crew across ${res.day_count} day(s)${skipped}`
+                );
+                await load();
+                onChanged?.();
+            }
+        } catch (e) {
+            setBulkNote(String(e));
+        } finally {
+            setBulkBusy(false);
+        }
+    }
 
     const load = useCallback(async () => {
         if (!state?.id) return;
@@ -173,6 +227,68 @@ export default function CrewRoster({ state, onChanged }) {
         // string, never as something you could act on.
         <div className="h-full flex" data-testid="crew-roster-planner">
         <div className="flex-1 min-w-0 h-full flex flex-col" data-testid="crew-roster">
+            {/* Bulk planning bar. Days off were the only duty this desk could
+                write, which left the standby bank — the thing that decides
+                whether tomorrow's sickness is survivable — to a random draw. */}
+            {(
+                <div
+                    className="px-4 py-2 border-b border-[var(--status-info)] bg-[var(--status-info)]/5 flex items-center gap-3 flex-wrap font-mono-jb text-xs"
+                    data-testid="roster-bulk-bar"
+                >
+                    <span className="t-info uppercase-wide">
+                        PLAN DUTY · {selected.size} CREW · {selectedDays.size} DAY
+                        {selectedDays.size === 1 ? "" : "S"}
+                    </span>
+                    {selected.size > 0 && selectedDays.size > 0 ? (
+                        <>
+                            {[
+                                ["OFF", "DAY OFF"],
+                                ["SBY_APT", "AIRPORT STANDBY"],
+                                ["SBY_HOME", "HOME STANDBY"],
+                                ["CLEAR", "CLEAR"],
+                            ].map(([code, label]) => (
+                                <button
+                                    key={code}
+                                    className="btn btn-primary"
+                                    disabled={bulkBusy}
+                                    onClick={() => applyBulk(code)}
+                                    data-testid={`bulk-${code}`}
+                                    title={
+                                        code === "SBY_APT"
+                                            ? "30min to report, but their duty clock is already running"
+                                            : code === "SBY_HOME"
+                                            ? "90min to report, fresh, erodes FDP past 6h on standby"
+                                            : undefined
+                                    }
+                                >
+                                    {bulkBusy ? "…" : label}
+                                </button>
+                            ))}
+                        </>
+                    ) : (
+                        <span className="t-muted">
+                            {selected.size === 0 && selectedDays.size === 0
+                                ? "① Tick crew on the left, then ② click the day columns you want to change."
+                                : selected.size === 0
+                                ? "① Now tick the crew on the left."
+                                : "② Now click one or more day columns in the header."}
+                        </span>
+                    )}
+                    <button
+                        className="btn ml-auto"
+                        onClick={() => {
+                            setSelected(new Set());
+                            setSelectedDays(new Set());
+                            setBulkNote(null);
+                        }}
+                        data-testid="bulk-clear-selection"
+                    >
+                        DESELECT
+                    </button>
+                    {bulkNote && <span className="t-nominal w-full">{bulkNote}</span>}
+                </div>
+            )}
+
             {/* Header */}
             <div className="px-4 py-3 border-b border-white/10 flex items-center gap-4">
                 <div>
@@ -238,19 +354,68 @@ export default function CrewRoster({ state, onChanged }) {
                 <table className="text-xs font-mono-jb border-collapse" data-testid="roster-cal-table">
                     <thead className="sticky top-0 bg-[#050505] z-10">
                         <tr className="uppercase-wide t-muted">
+                            <th className="px-2 py-2 border-b border-white/10 sticky left-0 bg-[#050505] z-20">
+                                <input
+                                    type="checkbox"
+                                    aria-label="Select all shown crew"
+                                    data-testid="roster-select-all"
+                                    checked={rows.length > 0 && rows.every((r) => selected.has(r.crew_id))}
+                                    onChange={(e) =>
+                                        setSelected(
+                                            e.target.checked
+                                                ? new Set(rows.map((r) => r.crew_id))
+                                                : new Set()
+                                        )
+                                    }
+                                />
+                            </th>
                             <th className="text-left px-3 py-2 border-b border-white/10 sticky left-0 bg-[#050505] z-20">CREW</th>
                             <th className="text-left px-2 py-2 border-b border-white/10">RANK</th>
                             <th className="text-right px-2 py-2 border-b border-white/10" title="Consecutive duty days since last day off">CONSEC</th>
+                            {/* falls through to the day columns, which are the
+                                second axis of the selection */}
                             {cols.map((col) => {
                                 const { wd, dom } = fmtCol(col.date);
+                                const daySelected = selectedDays.has(col.day);
+                                const selectable = col.is_future || col.is_today;
                                 return (
                                     <th
                                         key={col.day}
+                                        onClick={selectable ? () => toggleDay(col.day) : undefined}
+                                        aria-pressed={selectable ? daySelected : undefined}
+                                        title={
+                                            selectable
+                                                ? "Click to select this day for a roster change"
+                                                : "Past days cannot be changed"
+                                        }
+                                        data-testid={`roster-day-${col.day}`}
+                                        // One style attribute. There were two, and JSX keeps the
+                                        // last — so the selected-day highlight was silently
+                                        // discarded and clicking a column did nothing visible.
+                                        style={{
+                                            boxShadow: daySelected
+                                                ? "inset 0 0 0 2px var(--status-info)"
+                                                : col.is_today
+                                                ? "inset 0 -2px 0 0 var(--status-info)"
+                                                : undefined,
+                                            background: daySelected
+                                                ? "color-mix(in srgb, var(--status-info) 18%, transparent)"
+                                                : undefined,
+                                        }}
                                         className={`px-1 py-2 text-center border-b border-white/10 border-r border-white/[0.04] ${
-                                            col.is_today ? "t-info" : col.is_future ? "t-sec" : "t-muted"
-                                        }`}
-                                        style={col.is_today ? { boxShadow: "inset 0 -2px 0 0 var(--status-info)" } : undefined}
+                                            selectable ? "cursor-pointer hover:bg-white/[0.06]" : ""
+                                        } ${col.is_today ? "t-info" : col.is_future ? "t-sec" : "t-muted"}`}
                                     >
+                                        {selectable && (
+                                            <input
+                                                type="checkbox"
+                                                className="pointer-events-none"
+                                                tabIndex={-1}
+                                                aria-label={`Select ${col.date}`}
+                                                checked={daySelected}
+                                                readOnly
+                                            />
+                                        )}
                                         <div className="text-[9px]">{wd}</div>
                                         <div className="text-[11px]">{dom}</div>
                                         {col.is_today && <div className="text-[8px] t-info">TDY</div>}
@@ -265,9 +430,20 @@ export default function CrewRoster({ state, onChanged }) {
                             return (
                                 <tr
                                     key={c.crew_id}
-                                    className="border-b border-white/[0.04] hover:bg-white/[0.02]"
+                                    className={`border-b border-white/[0.04] hover:bg-white/[0.02] ${
+                                        selected.has(c.crew_id) ? "bg-[var(--status-info)]/10" : ""
+                                    }`}
                                     data-testid={`roster-row-${c.crew_id}`}
                                 >
+                                    <td className="px-2 py-1 sticky left-0 bg-[#050505] z-10">
+                                        <input
+                                            type="checkbox"
+                                            aria-label={`Select ${c.crew_id} ${c.name}`}
+                                            data-testid={`roster-select-${c.crew_id}`}
+                                            checked={selected.has(c.crew_id)}
+                                            onChange={() => toggleCrew(c.crew_id)}
+                                        />
+                                    </td>
                                     <td className="px-3 py-1 sticky left-0 bg-[#050505] z-10 whitespace-nowrap">
                                         <span className="t-info">{c.crew_id}</span>{" "}
                                         <span className="t-sec">{c.name}</span>
