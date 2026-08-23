@@ -230,13 +230,13 @@ export default function CrewRoster({ state, onChanged }) {
             {/* Bulk planning bar. Days off were the only duty this desk could
                 write, which left the standby bank — the thing that decides
                 whether tomorrow's sickness is survivable — to a random draw. */}
-            {(selected.size > 0 || selectedDays.size > 0) && (
+            {(
                 <div
                     className="px-4 py-2 border-b border-[var(--status-info)] bg-[var(--status-info)]/5 flex items-center gap-3 flex-wrap font-mono-jb text-xs"
                     data-testid="roster-bulk-bar"
                 >
                     <span className="t-info uppercase-wide">
-                        {selected.size} CREW · {selectedDays.size} DAY
+                        PLAN DUTY · {selected.size} CREW · {selectedDays.size} DAY
                         {selectedDays.size === 1 ? "" : "S"}
                     </span>
                     {selected.size > 0 && selectedDays.size > 0 ? (
@@ -267,9 +267,11 @@ export default function CrewRoster({ state, onChanged }) {
                         </>
                     ) : (
                         <span className="t-muted">
-                            {selected.size === 0
-                                ? "Tick crew on the left."
-                                : "Now click one or more day columns."}
+                            {selected.size === 0 && selectedDays.size === 0
+                                ? "① Tick crew on the left, then ② click the day columns you want to change."
+                                : selected.size === 0
+                                ? "① Now tick the crew on the left."
+                                : "② Now click one or more day columns in the header."}
                         </span>
                     )}
                     <button
@@ -370,6 +372,8 @@ export default function CrewRoster({ state, onChanged }) {
                             <th className="text-left px-3 py-2 border-b border-white/10 sticky left-0 bg-[#050505] z-20">CREW</th>
                             <th className="text-left px-2 py-2 border-b border-white/10">RANK</th>
                             <th className="text-right px-2 py-2 border-b border-white/10" title="Consecutive duty days since last day off">CONSEC</th>
+                            {/* falls through to the day columns, which are the
+                                second axis of the selection */}
                             {cols.map((col) => {
                                 const { wd, dom } = fmtCol(col.date);
                                 const daySelected = selectedDays.has(col.day);
@@ -378,18 +382,40 @@ export default function CrewRoster({ state, onChanged }) {
                                     <th
                                         key={col.day}
                                         onClick={selectable ? () => toggleDay(col.day) : undefined}
-                                        aria-pressed={daySelected}
-                                        data-testid={`roster-day-${col.day}`}
-                                        style={
-                                            daySelected
-                                                ? { boxShadow: "inset 0 -2px 0 0 var(--status-info)" }
-                                                : undefined
+                                        aria-pressed={selectable ? daySelected : undefined}
+                                        title={
+                                            selectable
+                                                ? "Click to select this day for a roster change"
+                                                : "Past days cannot be changed"
                                         }
+                                        data-testid={`roster-day-${col.day}`}
+                                        // One style attribute. There were two, and JSX keeps the
+                                        // last — so the selected-day highlight was silently
+                                        // discarded and clicking a column did nothing visible.
+                                        style={{
+                                            boxShadow: daySelected
+                                                ? "inset 0 0 0 2px var(--status-info)"
+                                                : col.is_today
+                                                ? "inset 0 -2px 0 0 var(--status-info)"
+                                                : undefined,
+                                            background: daySelected
+                                                ? "color-mix(in srgb, var(--status-info) 18%, transparent)"
+                                                : undefined,
+                                        }}
                                         className={`px-1 py-2 text-center border-b border-white/10 border-r border-white/[0.04] ${
-                                            col.is_today ? "t-info" : col.is_future ? "t-sec" : "t-muted"
-                                        }`}
-                                        style={col.is_today ? { boxShadow: "inset 0 -2px 0 0 var(--status-info)" } : undefined}
+                                            selectable ? "cursor-pointer hover:bg-white/[0.06]" : ""
+                                        } ${col.is_today ? "t-info" : col.is_future ? "t-sec" : "t-muted"}`}
                                     >
+                                        {selectable && (
+                                            <input
+                                                type="checkbox"
+                                                className="pointer-events-none"
+                                                tabIndex={-1}
+                                                aria-label={`Select ${col.date}`}
+                                                checked={daySelected}
+                                                readOnly
+                                            />
+                                        )}
                                         <div className="text-[9px]">{wd}</div>
                                         <div className="text-[11px]">{dom}</div>
                                         {col.is_today && <div className="text-[8px] t-info">TDY</div>}
