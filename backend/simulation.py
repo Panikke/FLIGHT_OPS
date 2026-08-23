@@ -1445,6 +1445,79 @@ def _today_duty_code(state: dict, crew: dict) -> str:
     return "AVL"   # available reserve / open
 
 
+def _duty_line_for(state: dict, crew: dict) -> dict:
+    """Today's duty as a roster LINE — report, off-duty, sectors, route, and
+    the FDP it consumes against the cap.
+
+    A cell that says only "FLT" tells the player nothing about the shape of the
+    duty: an 05:00 four-sector day and a 14:00 single-sector day looked
+    identical, even though every fatigue rule in this engine distinguishes
+    them."""
+    sectors = sorted(
+        (f for f in state["flights"]
+         if crew["id"] in f.get("assigned_crew_ids", []) and f["status"] != "cancelled"),
+        key=lambda f: f["std"],
+    )
+    if not sectors:
+        return {}
+    first, last = sectors[0], sectors[-1]
+    report = datetime.fromisoformat(first["std"]) - timedelta(minutes=60)
+    off_duty = (datetime.fromisoformat(last["sta"])
+                + timedelta(minutes=last.get("delay_min", 0) + 30))
+    total, _sched, delay, count = _pairing_fdp_min(state, first)
+    cap, _basis = _fdp_cap_for_flight(
+        first, sectors=count, acclimatised=_crew_acclimatised(state, crew, first))
+    cap -= _standby_fdp_reduction_min(crew)
+    stations = [sectors[0]["origin"]] + [s["destination"] for s in sectors]
+    return {
+        "pairing_id": first.get("pairing_id"),
+        "report_z": report.strftime("%H:%M"),
+        "off_duty_z": off_duty.strftime("%H:%M"),
+        "sectors": len(sectors),
+        "route": "-".join(stations),
+        "callsigns": [s["callsign"] for s in sectors],
+        "fdp_min": total,
+        "fdp_cap_min": cap,
+        "fdp_delay_min": delay,
+        "over_cap": total > cap,
+    }
+
+
+def open_time(state: dict) -> list[dict]:
+    """Flying with nobody on it — the real desk's first question of the day.
+
+    `roster_completeness` has always computed this; it was consumed only as an
+    OPEN_SECTOR warning string and never as a work list you could assign from.
+    Real systems call it OPEN TIME."""
+    rows = []
+    for m in roster_completeness(state)["missing"]:
+        f = next((x for x in state["flights"] if x["id"] == m["flight_id"]), None)
+        if not f or f["status"] == "cancelled":
+            continue
+        gaps = {r: n for r, n in m["need"].items() if n}
+        if not gaps:
+            continue
+        rows.append({
+            "flight_id": f["id"], "callsign": f["callsign"],
+            "pairing_id": f.get("pairing_id"),
+            "origin": f["origin"], "destination": f["destination"],
+            "std": f["std"], "block_min": f["block_min"],
+            "aircraft_type": f["aircraft_type"],
+            "needs": gaps,
+            "short_by": sum(gaps.values()),
+            # Who could legally take it right now, per open rank.
+            "candidates": {
+                rank: [
+                    {"crew_id": c["id"], "name": c["name"], "fatigue": c["fatigue_score"]}
+                    for c in _legal_candidates(state, f, rank, ("available", "standby"))[:5]
+                ]
+                for rank in gaps
+            },
+        })
+    rows.sort(key=lambda r: r["std"])
+    return rows
+
+
 def crew_roster(state: dict, past_days: int = 5, future_days: int = 4) -> dict:
     """Build the AerOPS-style crew calendar: one row per crew, one cell per day.
     Past cells come from the recorded duty_history, today is live, future cells
@@ -1471,7 +1544,10 @@ def crew_roster(state: dict, past_days: int = 5, future_days: int = 4) -> dict:
                 code = hist[-offset] if offset <= len(hist) else None
                 cells.append({"day": d, "code": code, "rel": "past"})
             elif d == day_number:
-                cells.append({"day": d, "code": _today_duty_code(state, c), "rel": "today"})
+                cells.append({
+                    "day": d, "code": _today_duty_code(state, c), "rel": "today",
+                    **_duty_line_for(state, c),
+                })
             else:
                 cells.append({
                     "day": d,

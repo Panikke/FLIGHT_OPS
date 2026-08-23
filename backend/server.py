@@ -135,6 +135,18 @@ async def irregularities(game_id: str):
     }
 
 
+@api_router.get("/sim/{game_id}/open_time")
+async def open_time(game_id: str):
+    """Uncovered flying, with the legal candidates for each open rank."""
+    state = await _load(game_id)
+    rows = sim.open_time(state)
+    return {
+        "open_time": rows,
+        "sectors": len(rows),
+        "positions": sum(r["short_by"] for r in rows),
+    }
+
+
 @api_router.get("/sim/{game_id}/crew_disposition")
 async def crew_disposition(game_id: str):
     """The disposition desk: every crew who is not where they need to be, and
