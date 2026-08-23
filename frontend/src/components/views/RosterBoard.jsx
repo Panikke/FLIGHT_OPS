@@ -1,3 +1,4 @@
+import { flightStatus } from "../../lib/status";
 import React, { useMemo, useState, useCallback } from "react";
 
 function fmtClock(iso) {
@@ -5,15 +6,7 @@ function fmtClock(iso) {
     return iso.slice(11, 16);
 }
 
-function flightStatus(f) {
-    if (f.status === "cancelled") return { label: "CNX", tone: "t-crit" };
-    if (f.status === "diverted") return { label: "DIV", tone: "t-crit" };
-    if (f.delay_min >= 60) return { label: `DLY+${f.delay_min}`, tone: "t-crit" };
-    if (f.delay_min > 15) return { label: `DLY+${f.delay_min}`, tone: "t-warn" };
-    if (f.status === "airborne") return { label: "AIR", tone: "t-info" };
-    if (f.status === "boarding") return { label: "BRD", tone: "t-info" };
-    return { label: "OTP", tone: "t-nominal" };
-}
+
 
 export default function RosterBoard({ state, onOpenAssign, onStartDay, onUnassign, onAutoRoster }) {
     const [filter, setFilter] = useState("ALL");

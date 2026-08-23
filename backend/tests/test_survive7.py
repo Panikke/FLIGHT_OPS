@@ -112,6 +112,16 @@ class TestDifficultyCurve:
         state["phase"] = "OPS"
         total = 0
         for _ in range(20):
+            # A major TECH grounding freezes the whole clock until the player
+            # decides (see is_clock_paused), and this probe never decides. Left
+            # alone it wedges on the first grounding — which on day 7, where
+            # tech_mult is 2.5, happens almost immediately and would make the
+            # busiest day look like the quietest. Stand in for a controller who
+            # keeps up, so what this measures is the spawn RATE.
+            for inc in state["incidents"]:
+                if inc.get("requires_aircraft_decision") and inc["status"] == "open":
+                    inc["requires_aircraft_decision"] = False
+                    inc["status"] = "resolved"
             res = simmod.tick(state, minutes=30)
             total += len(res.get("new_incidents", []))
         return total

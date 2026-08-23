@@ -1,14 +1,14 @@
 import React from "react";
 
-const NAV = [
-    { id: "roster", label: "ROSTER" },
-    { id: "aircraft", label: "AIRCRAFT" },
-    { id: "timeline", label: "TIMELINE" },
-    { id: "incidents", label: "INCIDENTS" },
-    { id: "crew", label: "CREW" },
-    { id: "calendar", label: "DAYS OFF" },
-    { id: "advisor", label: "OPS ADVISOR" },
-    { id: "regs", label: "FTL REGS" },
+export const NAV = [
+    { id: "roster", label: "ROSTER", key: "1" },
+    { id: "aircraft", label: "AIRCRAFT", key: "2" },
+    { id: "timeline", label: "TIMELINE", key: "3" },
+    { id: "incidents", label: "INCIDENTS", key: "4" },
+    { id: "crew", label: "CREW", key: "5" },
+    { id: "calendar", label: "DAYS OFF", key: "6" },
+    { id: "advisor", label: "OPS ADVISOR", key: "7" },
+    { id: "regs", label: "FTL REGS", key: "8" },
 ];
 
 export default function Sidebar({ active, onSelect, state, openIncidentCount, rosterIncomplete, onExitToMenu }) {
@@ -46,7 +46,14 @@ export default function Sidebar({ active, onSelect, state, openIncidentCount, ro
                                     : "t-sec hover:bg-white/[0.03] hover:text-white"
                             }`}
                         >
-                            <span>{n.label}</span>
+                            <span>
+                                {n.label}
+                                {n.key && (
+                                    <span className="t-muted ml-2 normal-case" aria-hidden="true">
+                                        {n.key}
+                                    </span>
+                                )}
+                            </span>
                             {badge}
                         </button>
                     );

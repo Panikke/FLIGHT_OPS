@@ -1,3 +1,4 @@
+import { DELAY_CRIT_MIN, DELAY_WARN_MIN } from "../../lib/status";
 import React, { useMemo, useState } from "react";
 
 function tToPx(iso, dayStart) {
@@ -9,8 +10,8 @@ function flightTone(f) {
     if (f.status === "cancelled") return "bg-[var(--status-critical)]/30 border-[var(--status-critical)]";
     if (f.status === "diverted") return "bg-[var(--status-critical)]/30 border-[var(--status-critical)]";
     if (f.status === "landed") return "bg-white/5 border-white/20";
-    if (f.delay_min >= 60) return "bg-[var(--status-critical)]/25 border-[var(--status-critical)]";
-    if (f.delay_min > 15) return "bg-[var(--status-warning)]/25 border-[var(--status-warning)]";
+    if (f.delay_min >= DELAY_CRIT_MIN) return "bg-[var(--status-critical)]/25 border-[var(--status-critical)]";
+    if (f.delay_min > DELAY_WARN_MIN) return "bg-[var(--status-warning)]/25 border-[var(--status-warning)]";
     if (f.status === "airborne") return "bg-[var(--status-nominal)]/15 border-[var(--status-nominal)]";
     if (f.status === "boarding") return "bg-[var(--status-info)]/25 border-[var(--status-info)]";
     return "bg-[var(--status-info)]/15 border-[var(--status-info)]";
@@ -41,10 +42,16 @@ export default function FlightTimeline({ state }) {
     const dayStart = state.day_start;
     const hours = 24;
     const totalPx = 60 * hours * 1.2;
-    const tails = useMemo(
-        () => Array.from(new Set(state.flights.map((f) => f.aircraft_reg))),
-        [state.flights],
-    );
+    // Rows come from the FLEET, not from flights. A tail with no flying had no
+    // row at all, so the three spares - the primary recovery asset - were
+    // invisible on the board, as was any tail freed by a cancellation. On a
+    // tracking board the gaps are as informative as the bars.
+    const tails = useMemo(() => {
+        const fromFleet = (state.fleet || []).map((ac) => ac.reg);
+        const flying = state.flights.map((f) => f.aircraft_reg);
+        return Array.from(new Set([...fromFleet, ...flying])).filter(Boolean);
+    }, [state.fleet, state.flights]);
+    const minTurn = state.config?.min_turnaround_min ?? 45;
     const clockPx = tToPx(state.clock, dayStart);
 
     // Build crew rows: each crew member who has ≥1 assigned flight
@@ -140,24 +147,82 @@ export default function FlightTimeline({ state }) {
                         <HourRuler />
                         {tails.map((reg) => {
                             const ac = state.fleet.find((a) => a.reg === reg);
+                            // A tail grounded by an expired MEL should read the
+                            // same on the board as it does on the aircraft desk.
+                            const grounded =
+                                !!ac?.grounded ||
+                                (ac?.mel_items || []).some((m) => m.expired);
                             const rows = state.flights
                                 .filter((f) => f.aircraft_reg === reg)
                                 .sort((a, b) => (a.std < b.std ? -1 : 1));
                             return (
-                                <div key={reg} className="flex border-b border-white/[0.05]" data-testid={`row-tail-${reg}`}>
+                                <div
+                                    key={reg}
+                                    className={`flex border-b border-white/[0.05] ${
+                                        grounded ? "bg-[var(--status-critical)]/10" : ""
+                                    }`}
+                                    data-testid={`row-tail-${reg}`}
+                                >
                                     <div className="w-[180px] flex-shrink-0 border-r border-white/10 px-3 py-3 font-mono-jb text-xs">
                                         <div className="t-info">{reg}</div>
-                                        <div className="t-muted">{ac?.type}</div>
+                                        <div className="t-muted">
+                                            {ac?.type}
+                                            {ac?.spare ? " SPARE" : ""}
+                                        </div>
+                                        {grounded && (
+                                            <div className="t-crit uppercase-wide">MEL GROUNDED</div>
+                                        )}
                                     </div>
                                     <div className="relative" style={{ width: totalPx, height: 56 }}>
-                                        {rows.map((f) => {
+                                        {rows.length === 0 && (
+                                            <div
+                                                className="absolute top-4 left-2 right-2 h-6 border border-dashed border-[var(--status-standby)] font-mono-jb text-[10px] px-2 flex items-center"
+                                                data-testid={`row-idle-${reg}`}
+                                            >
+                                                <span className="t-stby uppercase-wide">
+                                                    {ac?.spare ? "SPARE" : "IDLE"} - AVAILABLE ALL DAY
+                                                </span>
+                                            </div>
+                                        )}
+                                        {rows.map((f, i) => {
                                             const delay = f.delay_min || 0;
-                                            const left = tToPx(f.std, dayStart);
-                                            const width = Math.max(28, (f.block_min + delay) * 1.2);
+                                            // Delay displaces the departure; it does not make the
+                                            // sector longer. Drawing it as extra width claimed the
+                                            // aircraft flew for longer, which is not what happened.
+                                            const left = tToPx(f.std, dayStart) + delay * 1.2;
+                                            const width = Math.max(28, f.block_min * 1.2);
                                             const lbl = statusLabel(f);
+                                            // Ground time before this sector, measured against the
+                                            // turnaround minimum the engine already enforces.
+                                            const prev = i > 0 ? rows[i - 1] : null;
+                                            let ground = null;
+                                            if (prev && prev.status !== "cancelled" && f.status !== "cancelled") {
+                                                const prevArr =
+                                                    tToPx(prev.sta, dayStart) + (prev.delay_min || 0) * 1.2;
+                                                const gapPx = left - prevArr;
+                                                if (gapPx > 2) {
+                                                    ground = {
+                                                        left: prevArr,
+                                                        width: gapPx,
+                                                        min: Math.round(gapPx / 1.2),
+                                                    };
+                                                }
+                                            }
                                             return (
+                                              <React.Fragment key={f.id}>
+                                                {ground && (
+                                                    <div
+                                                        className={`absolute top-6 h-1.5 ${
+                                                            ground.min < minTurn
+                                                                ? "bg-[var(--status-warning)]"
+                                                                : "bg-white/15"
+                                                        }`}
+                                                        style={{ left: ground.left, width: ground.width }}
+                                                        title={`Ground time ${ground.min}min (minimum turnaround ${minTurn}min)`}
+                                                        data-testid={`ground-${f.callsign}`}
+                                                    />
+                                                )}
                                                 <div
-                                                    key={f.id}
                                                     className={`absolute top-2 h-10 border-l-2 ${flightTone(f)} px-2 py-1 font-mono-jb text-[11px] overflow-hidden`}
                                                     style={{ left, width }}
                                                     title={`${f.callsign} ${f.origin}-${f.destination} STD ${f.std.slice(11, 16)} status=${f.status} dly=${delay}${f.reactionary_min ? ` (knock-on ${f.reactionary_min}m: ${f.note || "inbound late"})` : ""}${f.curfew_violation ? ` [LHR CURFEW ${f.curfew_violation}]` : ""}`}
@@ -176,6 +241,7 @@ export default function FlightTimeline({ state }) {
                                                         )}
                                                     </div>
                                                 </div>
+                                              </React.Fragment>
                                             );
                                         })}
                                     </div>

@@ -22,6 +22,29 @@ function FdpBar({ fdpUsedMin }) {
     );
 }
 
+function DutyClock({ clock }) {
+    if (!clock || !clock.on_duty) {
+        return <span className="t-muted font-mono-jb text-[10px]">—</span>;
+    }
+    const slack = clock.slack_min;
+    const tone = slack < 0 ? "t-crit" : slack <= 60 ? "t-warn" : "t-nominal";
+    const hh = Math.floor(Math.abs(slack) / 60);
+    const mm = Math.abs(slack) % 60;
+    const off = clock.latest_off_blocks ? clock.latest_off_blocks.slice(11, 16) : "--:--";
+    return (
+        <div className="font-mono-jb text-[10px] leading-tight">
+            <div className={tone}>
+                {slack < 0 ? "OUT OF HOURS " : "T−"}
+                {hh}h{mm.toString().padStart(2, "0")}
+            </div>
+            <div className="t-muted">
+                OFF-BLKS BY {off}Z
+                {clock.delay_min > 0 ? ` · ${clock.delay_min}m DELAY` : ""}
+            </div>
+        </div>
+    );
+}
+
 export default function CrewPanel({ state }) {
     const [filter, setFilter] = useState("ALL");
     const [acFilter, setAcFilter] = useState("ALL");
@@ -100,6 +123,7 @@ export default function CrewPanel({ state }) {
                             <th className="text-left px-3 py-2 border-b border-white/10">BASE</th>
                             <th className="text-left px-3 py-2 border-b border-white/10">REST</th>
                             <th className="text-left px-3 py-2 border-b border-white/10">FDP USED</th>
+                            <th className="text-left px-3 py-2 border-b border-white/10">HOURS LEFT</th>
                             <th className="text-left px-3 py-2 border-b border-white/10">28D BLK</th>
                             <th className="text-left px-3 py-2 border-b border-white/10">FATIGUE</th>
                             <th className="text-left px-3 py-2 border-b border-white/10">STAT</th>
@@ -125,6 +149,9 @@ export default function CrewPanel({ state }) {
                                     <td className="px-3 py-2 t-sec">{c.rest_hr_since_duty.toFixed(0)}h</td>
                                     <td className="px-3 py-2">
                                         <FdpBar fdpUsedMin={c.fdp_used_min} />
+                                    </td>
+                                    <td className="px-3 py-2" data-testid={`duty-clock-${c.id}`}>
+                                        <DutyClock clock={state.duty_clocks?.[c.id]} />
                                     </td>
                                     <td className="px-3 py-2 t-sec">{c.block_28d_hr.toFixed(1)}</td>
                                     <td className={`px-3 py-2 ${c.fatigue_score > 70 ? "t-crit" : c.fatigue_score > 45 ? "t-warn" : "t-nominal"}`}>

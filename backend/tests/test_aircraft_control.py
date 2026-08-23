@@ -62,6 +62,20 @@ def _state(flights, fleet=None, phase="ROSTER"):
 
 # ---- Fleet spec / generation ----
 
+def test_new_game_fleet_is_isolated_per_game():
+    # state["fleet"] must be a deep copy of the FLEET template, not the same
+    # list/dicts shared across games — otherwise mutating one game's tails
+    # (e.g. an MEL deferral) would leak into every other game and into the
+    # module-level FLEET template itself.
+    state_a = sim.new_game("free_play")
+    state_b = sim.new_game("free_play")
+    ac_a = state_a["fleet"][0]
+    ac_a["mel_items"] = [{"id": "MEL-X", "category": "B", "note": "test",
+                           "days_remaining": 3, "expired": False}]
+    assert state_b["fleet"][0].get("mel_items", []) == []
+    assert sim.FLEET[0].get("mel_items", []) == []
+
+
 def test_new_game_has_spare_tails_that_dont_fly():
     state = sim.new_game("free_play")
     spares = [a for a in state["fleet"] if a.get("spare")]
@@ -151,6 +165,55 @@ def test_in_progress_rotation_not_reassignable():
     assert any(x["code"] == "AC_DEPARTED" for x in w)
     v = sim.aircraft_control(state)
     assert next(r for r in v["rotations"] if r["pairing_id"] == "P1")["reassignable"] is False
+
+
+def test_partially_flown_pairing_stays_reassignable_for_its_remaining_leg():
+    # Out-and-back: the outbound (EGW248) already landed, the return (EGW250)
+    # hasn't departed and its aircraft has just gone tech. Real ops calls
+    # this a mid-rotation tail swap — it must NOT be blocked just because an
+    # earlier leg of the same pairing already flew.
+    flights = [
+        _flight("EGW248", "G-EAGD", "A320", "04:00", 75, "P1",
+                origin="LHR", destination="MXP", status="landed"),
+        _flight("EGW250", "G-EAGD", "A320", "07:00", 75, "P1",
+                origin="MXP", destination="LHR", status="delayed"),
+    ]
+    state = _state(flights, fleet=[
+        {"reg": "G-EAGD", "type": "A320"},
+        {"reg": "G-EAGE", "type": "A320", "spare": True},
+    ])
+    # G-EAGE is idle at the hub (LHR), not MXP — a fresh spare can't take
+    # this leg either, matching real physical constraints, but this is a
+    # legality result, not a "nothing left to reassign" lockout.
+    w = sim.check_aircraft_assignment(state, "P1", "G-EAGE")
+    assert not any(x["code"] == "AC_DEPARTED" for x in w)
+    assert any(x["code"] == "AC_WRONG_STATION" for x in w)
+
+    v = sim.aircraft_control(state)
+    assert next(r for r in v["rotations"] if r["pairing_id"] == "P1")["reassignable"] is True
+
+
+def test_mid_rotation_swap_only_moves_the_remaining_leg():
+    flights = [
+        _flight("EGW248", "G-EAGD", "A320", "04:00", 75, "P1",
+                origin="LHR", destination="MXP", status="landed"),
+        _flight("EGW250", "G-EAGD", "A320", "07:00", 75, "P1",
+                origin="MXP", destination="LHR", status="delayed"),
+    ]
+    # G-EAGE flew into MXP earlier and is now sitting there — a legal
+    # candidate for the still-open return leg.
+    flights.append(_flight("EGW900", "G-EAGE", "A320", "05:00", 60, "P9",
+                            origin="LHR", destination="MXP", status="landed"))
+    state = _state(flights, fleet=[
+        {"reg": "G-EAGD", "type": "A320"},
+        {"reg": "G-EAGE", "type": "A320"},
+    ])
+    w = sim.check_aircraft_assignment(state, "P1", "G-EAGE")
+    assert w == []
+    res = sim.assign_aircraft(state, "P1", "G-EAGE")
+    assert res["applied"] is True
+    assert flights[0]["aircraft_reg"] == "G-EAGD"  # the already-landed leg keeps its real history
+    assert flights[1]["aircraft_reg"] == "G-EAGE"  # only the still-open leg moves
 
 
 def test_unknown_reference_returns_critical():

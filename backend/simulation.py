@@ -7,6 +7,7 @@ It is NOT an official compliance tool.
 """
 
 from __future__ import annotations
+import copy
 import math
 import random
 import uuid
@@ -76,6 +77,64 @@ CREW_NAMES = [
 # ------------------- Rules constants ------------------- #
 MIN_REST_HOME_HR = 12
 MIN_REST_AWAY_HR = 10
+# --- Commander's discretion (ORO.FTL.205(f)) --------------------------------
+# In unforeseen circumstances arising AFTER report, the commander may extend
+# max FDP by up to 2h (3h with an augmented crew). The following rest may be
+# reduced but never below 10h, and where the extension exceeds 1h the operator
+# must report it — with its own comments — to the competent authority within
+# 28 days. Its use must be non-punitive. This is a licensed judgement, not a
+# cheat: it is the difference between a captain making a call and the roster
+# being broken.
+# https://www.easa.europa.eu/en/faq/47599
+DISCRETION_MAX_MIN = 120
+DISCRETION_MAX_MIN_AUGMENTED = 180
+DISCRETION_REPORT_THRESHOLD_MIN = 60
+DISCRETION_MIN_REST_AFTER_HR = 10
+# --- Standby, ORO.FTL.225 / CS FTL.1.225 -----------------------------------
+# Airport standby counts IN FULL as duty; other (home) standby counts at 25%.
+# Where home standby runs past 6 hours, the maximum FDP is reduced by the
+# excess. That is what makes the standby bank a real planning decision: the
+# airport standby answers fast but is already burning duty, the home standby
+# is fresh but costs you an hour and a half you may not have.
+# https://regulatorylibrary.caa.co.uk/965-2012/Content/AMC%20GM%201/CS%20FTL%201%20225%20Standby.htm
+STANDBY_AIRPORT = "APT"
+STANDBY_HOME = "HSBY"
+# Time from the call to reporting at the aircraft. Contractual rather than
+# regulatory — these are typical UK short-haul figures, not a published rule.
+STANDBY_RESPONSE_MIN = {STANDBY_AIRPORT: 30, STANDBY_HOME: 90}
+STANDBY_DUTY_FRACTION = {STANDBY_AIRPORT: 1.0, STANDBY_HOME: 0.25}
+# Home standby beyond this erodes the FDP that follows it.
+STANDBY_FDP_FREE_HR = 6
+# --- Basic maximum daily FDP, ORO.FTL.205(b) -------------------------------
+# Table 2 (acclimatised crew): the cap falls with a later report and with every
+# extra sector, which is what makes an early multi-sector short-haul day
+# genuinely tighter than a late single-sector one. Bands are the start of the
+# FDP (report time) in local time at the reporting point; values in minutes.
+# https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:32014R0083
+_FDP_SECTOR_STEPS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+FDP_TABLE_ACCLIMATISED = {
+    #  band start (inclusive) -> caps by sector count 1-2, 3, 4, 5, 6, 7, 8, 9, 10+
+    ("05:00", "05:14"): (780, 750, 720, 690, 660, 630, 600, 570, 540),
+    ("05:15", "05:29"): (795, 765, 735, 705, 675, 645, 615, 570, 540),
+    ("05:30", "05:44"): (810, 780, 750, 720, 690, 660, 630, 570, 540),
+    ("05:45", "05:59"): (825, 795, 765, 735, 705, 675, 645, 570, 540),
+    ("06:00", "13:29"): (780 + 0, 750, 720, 690, 660, 630, 600, 570, 540),
+    ("13:30", "13:59"): (765, 735, 705, 675, 645, 615, 585, 555, 540),
+    ("14:00", "14:29"): (750, 720, 690, 660, 630, 600, 570, 540, 540),
+    ("14:30", "14:59"): (735, 705, 675, 645, 615, 585, 555, 540, 540),
+    ("15:00", "15:29"): (720, 690, 660, 630, 600, 570, 540, 540, 540),
+    ("15:30", "15:59"): (705, 675, 645, 615, 585, 555, 540, 540, 540),
+    ("16:00", "16:29"): (690, 660, 630, 600, 570, 540, 540, 540, 540),
+    ("16:30", "16:59"): (675, 645, 615, 585, 555, 540, 540, 540, 540),
+    ("17:00", "04:59"): (660, 630, 600, 570, 540, 540, 540, 540, 540),
+}
+# Table 3 — crew in an UNKNOWN state of acclimatisation, which is every crew
+# returning from one of our long-haul outstations (all >=4h off UTC). No
+# start-time banding: the whole point is that their body clock is unknown.
+FDP_TABLE_UNKNOWN = (660, 630, 600, 570, 540, 540, 540, 540, 540)
+# Stations far enough off UTC that a night-stop leaves the crew unacclimatised.
+LONG_HAUL_STATIONS = frozenset(dest for _o, dest, _b, _t in ROUTES_LONG)
+
 MAX_FDP_MIN_2SECTOR = 13 * 60         # short-haul, unaugmented
 MAX_FDP_MIN_LONGHAUL_BASE = 14 * 60   # long-haul unaugmented
 MAX_FDP_MIN_LONGHAUL_BUNK = 18 * 60   # long-haul, augmented crew + Class 1 bunks
@@ -89,6 +148,24 @@ DIVERSION_RECOVERY_MIN = 120     # extra positioning time after a diversion befo
 CURFEW_AIRPORT = "LHR"
 CURFEW_START_HOUR = 23
 CURFEW_END_HOUR = 6
+# Ferry (positioning) flights burn fuel and crew time for zero revenue — a
+# genuine but expensive last-resort lever, not a free one. Dispatch fee plus
+# a per-minute rate that scales with the type's fuel burn (wide-bodies cost
+# noticeably more per minute to reposition empty than a narrow-body).
+# Covers the slot, ground handling, crew callout AND positioning the two
+# flight-deck crew to wherever the tail is stranded.
+FERRY_DISPATCH_FEE_USD = 2500
+FERRY_COST_PER_MIN_USD = {"A320": 10, "A350": 24, "B777": 27}
+# What a minute of delay actually costs the network. EUROCONTROL's Standard
+# Inputs put all-cause at-gate tactical delay at ~EUR166/min INCLUDING the
+# reactionary knock-on, and network-average ATFM delay at EUR100/min. We price
+# the reactionary minute alone at the lower figure — the primary delay that
+# caused it is already paid for through the incident's own cost.
+# https://ansperformance.eu/economics/cba/standard-inputs/latest/chapters/cost_of_delay.html
+DELAY_COST_PER_MIN_USD = 110
+# Real carriers run a completion factor in the high nineties; below that the
+# schedule stops being a schedule.
+TARGET_COMPLETION_FACTOR_PCT = 98
 CURFEW_FINE_BASE_USD = 6000
 CURFEW_FINE_PER_PAX_USD = 8
 # Recurrent days free of duty: crew may not operate beyond this many consecutive
@@ -99,22 +176,128 @@ DAYS_OFF_WARN_AT = MAX_CONSECUTIVE_DUTY_DAYS - 1
 DUTY_FREE_CODES = ("OFF", "REST", "SICK")   # a day that resets the consecutive-duty count
 
 
-def _fdp_cap_for_flight(flight: dict) -> tuple[int, str]:
-    """Return (max_fdp_min, basis_str) for a flight given aircraft + crew complement."""
+def _pairing_fdp_min(state: dict, flight: dict) -> tuple[int, int, int, int]:
+    """FDP the pairing containing `flight` will consume, as
+    (total_min, scheduled_min, delay_min, sector_count).
+
+    A Flight Duty Period runs from report to the final on-blocks, so ground
+    delay is FDP burned — a pairing that slips two hours costs its crew two
+    hours of duty they will never get back. The scheduled baseline is report
+    (60) + block + turnarounds (60 per sector change) + post-flight (30);
+    the delay term is the last sector's accumulated delay, which is where
+    the pairing actually ends. Earlier sectors' delays reach it through
+    `propagate_reactionary_delays`, since a pairing shares one tail."""
+    pairing_id = flight.get("pairing_id")
+    pairing_flights = [f for f in state["flights"] if pairing_id and f.get("pairing_id") == pairing_id]
+    if not pairing_flights:
+        pairing_flights = [flight]
+    pairing_flights.sort(key=lambda f: f["std"])
+    sectors = len(pairing_flights)
+    block = sum(pf["block_min"] for pf in pairing_flights)
+    scheduled = block + 60 + 30 + (sectors - 1) * 60
+    delay = pairing_flights[-1].get("delay_min", 0)
+    return scheduled + delay, scheduled, delay, sectors
+
+
+def _sector_column(sectors: int) -> int:
+    """Table column index for a sector count. Column 0 covers 1-2 sectors, then
+    one column per sector (3, 4, 5 ...), with 10+ sharing the last."""
+    sectors = sectors or 1
+    idx = 0 if sectors <= 2 else sectors - 2
+    return max(0, min(len(FDP_TABLE_UNKNOWN) - 1, idx))
+
+
+def _fdp_band_for(report_hhmm: str) -> tuple[str, str] | None:
+    for band in FDP_TABLE_ACCLIMATISED:
+        start, end = band
+        if start <= end:
+            if start <= report_hhmm <= end:
+                return band
+        else:                       # band wraps midnight (17:00-04:59)
+            if report_hhmm >= start or report_hhmm <= end:
+                return band
+    return None
+
+
+def _seed_standby_duty(crew: dict, index: int) -> None:
+    """Put a standby crew on a real standby duty. Roughly one in three is held
+    at the airport — they answer in half an hour but their duty clock is
+    already running, which is exactly why airlines hold few of them."""
+    airport = index % 3 == 0
+    crew["standby_type"] = STANDBY_AIRPORT if airport else STANDBY_HOME
+    # Standby started somewhere in the first part of the day; how long they
+    # have been sitting is what erodes the FDP they can then operate.
+    crew["standby_elapsed_hr"] = round(random.uniform(0.5, 8.0), 1)
+
+
+def _standby_fdp_reduction_min(crew: dict) -> int:
+    """CS FTL.1.225: home standby past 6h cuts the FDP that follows it by the
+    excess. Airport standby does not reduce the cap — it counts as duty in
+    full instead, which the duty accounting handles."""
+    if crew.get("status") != "standby" or crew.get("standby_type") != STANDBY_HOME:
+        return 0
+    excess_hr = (crew.get("standby_elapsed_hr", 0) or 0) - STANDBY_FDP_FREE_HR
+    return int(max(0, excess_hr) * 60)
+
+
+def standby_response_min(crew: dict) -> int:
+    """How long from the call until this crew can report."""
+    return STANDBY_RESPONSE_MIN.get(crew.get("standby_type", STANDBY_HOME), 90)
+
+
+def _fdp_cap_for_flight(flight: dict, sectors: int | None = None,
+                        acclimatised: bool = True) -> tuple[int, str]:
+    """Return (max_fdp_min, basis_str) for a flight.
+
+    Augmented crew with in-flight rest are handled by the separate in-flight
+    rest provisions rather than the basic table — ORO.FTL.205(b) Table 2 is
+    the cap for operations WITHOUT in-flight rest. Everything else reads the
+    real table: later report and more sectors both cut the cap, and a crew in
+    an unknown state of acclimatisation reads Table 3 instead."""
     ac_type = flight["aircraft_type"]
     block = flight["block_min"]
-    if block <= 360:
-        return MAX_FDP_MIN_2SECTOR, "short-haul, 2-sector acclimatised"
-    # Long-haul
     rest_class = AIRCRAFT_TYPES.get(ac_type, {}).get("crew_rest_class", "none")
     req = flight.get("required_crew", {})
     # Augmentation is carried entirely by relief First Officers now (a single
     # Captain operates every sector — see _required_crew_for) — so "augmented"
     # means a relief pilot is rostered, i.e. FO count above the base of 1.
     augmented = req.get("FO", 1) >= 2
-    if augmented and rest_class == "class_1":
+    if block > 360 and augmented and rest_class == "class_1":
         return MAX_FDP_MIN_LONGHAUL_BUNK, f"long-haul augmented crew + Class 1 bunks ({ac_type})"
-    return MAX_FDP_MIN_LONGHAUL_BASE, f"long-haul ({ac_type}) without bunk/augment extension"
+
+    if sectors is None:
+        sectors = 1 if block > 360 else 2
+    col = _sector_column(sectors)
+    sector_label = "1-2 sectors" if sectors <= 2 else f"{sectors} sectors"
+
+    if not acclimatised:
+        return FDP_TABLE_UNKNOWN[col], (
+            f"unknown acclimatisation state, {sector_label} "
+            f"(ORO.FTL.205 Table 3)"
+        )
+
+    report = datetime.fromisoformat(flight["std"]) - timedelta(minutes=60)
+    hhmm = report.strftime("%H:%M")
+    band = _fdp_band_for(hhmm)
+    if band is None:                                     # defensive
+        return MAX_FDP_MIN_2SECTOR, "acclimatised, 2-sector (fallback)"
+    cap = FDP_TABLE_ACCLIMATISED[band][col]
+    if block > 360 and not augmented:
+        # An unaugmented long-haul sector still reads the basic table, but we
+        # keep the old floor so a single ultra-long sector is not made
+        # impossible by a late report alone.
+        cap = max(cap, MAX_FDP_MIN_LONGHAUL_BASE) if sectors <= 2 else cap
+        return cap, f"long-haul ({ac_type}) without in-flight rest, report {hhmm}"
+    return cap, f"acclimatised, {sector_label}, report {hhmm} (Table 2)"
+
+
+def _crew_acclimatised(state: dict, crew: dict, flight: dict) -> bool:
+    """A crew who night-stopped at one of our long-haul outstations is in an
+    unknown state of acclimatisation — every long-haul destination we serve is
+    at least four hours off UTC."""
+    dep = datetime.fromisoformat(flight["std"])
+    at = _crew_position_before(state, crew["id"], dep)
+    return at not in LONG_HAUL_STATIONS
 
 # ------------------- Helpers ------------------- #
 
@@ -124,6 +307,26 @@ def _hash_id(prefix: str) -> str:
 
 def now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# Fallback block time for a city pair not in ROUTES_SHORT/ROUTES_LONG (there
+# shouldn't be one, since the network only ever schedules real flights
+# between airports that appear in these tables — this only guards against an
+# unmodelled pair ever reaching a ferry calculation).
+FERRY_FALLBACK_BLOCK_MIN = 180
+
+
+def _route_block_min(origin: str, dest: str) -> int:
+    """Typical block time between two airports, in either direction, reusing
+    the same route data the day's schedule is generated from — a positioning
+    (ferry) flight isn't a new kind of trip, just an empty one."""
+    for o, d, blk in ROUTES_SHORT:
+        if {o, d} == {origin, dest}:
+            return blk
+    for o, d, blk, _t in ROUTES_LONG:
+        if {o, d} == {origin, dest}:
+            return blk
+    return FERRY_FALLBACK_BLOCK_MIN
 
 
 # ------------------- Crew generation ------------------- #
@@ -209,6 +412,8 @@ def _make_crew(rank: str, quals: list[str], cid: int, used_names: set[str]) -> d
         "block_28d_hr": round(random.uniform(20, 70), 1),
         "duty_7d_hr": round(random.uniform(10, 35), 1),
         "rest_hr_since_duty": round(random.uniform(11, 30), 1),
+        "last_duty_min": 0,          # length of the duty most recently completed
+        "station": None,             # where they are now; None = at base
         "status": "available",        # available | on_duty | rest | standby | sick | off
         "assigned_flight_id": None,
         "fatigue_score": random.randint(15, 45),  # 0-100 lower better
@@ -391,9 +596,11 @@ def new_game(scenario: str = "free_play") -> dict:
     for c in crew:
         if c["rank"] in ("CP", "FO") and standby_count < 4:
             c["status"] = "standby"
+            _seed_standby_duty(c, standby_count)
             standby_count += 1
         elif c["rank"] in ("SC", "CC") and standby_count < 14:
             c["status"] = "standby"
+            _seed_standby_duty(c, standby_count)
             standby_count += 1
 
     state = {
@@ -401,11 +608,12 @@ def new_game(scenario: str = "free_play") -> dict:
         "scenario": scenario,
         "created_at": now_utc_iso(),
         "airline": AIRLINE,
-        "fleet": FLEET,
+        "fleet": copy.deepcopy(FLEET),
         "crew": crew,
         "flights": flights,
         "incidents": [],
         "decisions_log": [],
+        "cascade_log": [],
         "kpis": {
             "otp_pct": 100.0,
             "legality_breaches": 0,
@@ -415,6 +623,12 @@ def new_game(scenario: str = "free_play") -> dict:
             "cost_usd": 0,
             "pax_delay_min": 0,
             "pax_disrupted": 0,
+            "reactionary_min": 0,
+            "duty_of_care_usd": 0,
+            "discretion_used_count": 0,
+            "discretion_reports": 0,
+            "delay_cost_usd": 0,
+            "completion_factor_pct": 100.0,
             "score": 1000,
         },
         "day_start": day_start_iso,
@@ -566,6 +780,19 @@ def advance_to_next_day(state: dict) -> dict:
                 if incoming_day not in planned:
                     planned.append(incoming_day)
 
+        # Where this crew physically ended the day. Derived BEFORE the flight
+        # list is replaced, and persisted, because tomorrow's position cannot
+        # be read off tomorrow's empty schedule.
+        c["station"] = (
+            long_haul_assignments[c["id"]]["station"]
+            if c["id"] in long_haul_assignments
+            else _crew_end_of_day_station(state, c)
+        )
+        c.pop("discretion_used", None)
+        c.pop("rest_floor_next_hr", None)
+        # Positioning legs carry absolute timestamps from today; left in place
+        # they read as a permanently-satisfied move tomorrow.
+        c.pop("positioning", None)
         c.setdefault("block_history", [])
         c["block_history"].append(flown)
         # keep sliding window of last 28 days
@@ -588,7 +815,15 @@ def advance_to_next_day(state: dict) -> dict:
         else:
             c["fatigue_score"] = max(5, c["fatigue_score"] - random.randint(6, 12))
         # Rest
-        c["rest_hr_since_duty"] = round(random.uniform(11, 30), 1) if flown == 0 else round(random.uniform(12, 18), 1)
+        if flown == 0:
+            c["rest_hr_since_duty"] = round(random.uniform(11, 30), 1)
+        else:
+            # Overnight rest is what is left of the 24h day after the duty the
+            # crew actually worked — a long day genuinely eats into it, which
+            # is the whole reason the ORO.FTL.235 "at least as long as the
+            # preceding duty" floor exists.
+            duty_hr = c.get("last_duty_min", 0) / 60
+            c["rest_hr_since_duty"] = round(max(8.0, 24.0 - duty_hr + random.uniform(-1.0, 2.0)), 1)
         # Recover most sick crew
         if c["status"] == "sick":
             if random.random() < 0.7:
@@ -614,10 +849,30 @@ def advance_to_next_day(state: dict) -> dict:
     for c in available:
         if c["rank"] in ("CP", "FO") and standby_count < 4:
             c["status"] = "standby"
+            _seed_standby_duty(c, standby_count)
             standby_count += 1
         elif c["rank"] in ("SC", "CC") and standby_count < 14:
             c["status"] = "standby"
+            _seed_standby_duty(c, standby_count)
             standby_count += 1
+
+    # Overnight engineering: most open MEL deferrals get rectified before the
+    # next day's ops; anything left standing counts down another day, and a
+    # defect that runs out its category's deferral window grounds the tail
+    # (see AC_MEL_EXPIRED in check_aircraft_assignment) until cleared.
+    for ac in state.get("fleet", []):
+        items = ac.get("mel_items")
+        if not items:
+            continue
+        kept = []
+        for m in items:
+            if random.random() < MEL_OVERNIGHT_CLEAR_PROB:
+                continue  # engineering cleared it overnight
+            m["days_remaining"] -= 1
+            if m["days_remaining"] <= 0:
+                m["expired"] = True
+            kept.append(m)
+        ac["mel_items"] = kept
 
     # Advance the day clock
     today_dt = datetime.fromisoformat(state["day_start"])
@@ -648,6 +903,7 @@ def advance_to_next_day(state: dict) -> dict:
     state["flights"] = new_flights
     state["incidents"] = []
     state["decisions_log"] = []
+    state["cascade_log"] = []
     state["tick_count"] = 0
     state["phase"] = "ROSTER"
     state["kpis"] = {
@@ -659,6 +915,12 @@ def advance_to_next_day(state: dict) -> dict:
         "cost_usd": 0,
         "pax_delay_min": 0,
         "pax_disrupted": 0,
+        "reactionary_min": 0,
+        "duty_of_care_usd": 0,
+        "discretion_used_count": 0,
+        "discretion_reports": 0,
+        "delay_cost_usd": 0,
+        "completion_factor_pct": 100.0,
         "score": 1000,
     }
     return {
@@ -794,13 +1056,53 @@ def check_assignment(state: dict, flight_id: str, crew_id: str) -> list[dict]:
                 })
 
     # Rest
-    if crew["rest_hr_since_duty"] < MIN_REST_HOME_HR:
+    # Physical position. A crew based at LHR cannot operate a JFK departure
+    # without getting to JFK first — the same rule already enforced hard for
+    # tails (AC_WRONG_STATION). Overridable, because positioning them IS a
+    # real option; teleporting them is not.
+    # Positioning flights are exempt: getting the flight-deck crew to the
+    # stranded tail is part of what the ferry dispatch fee buys. Modelling that
+    # leg properly is the job of a real deadhead mechanic (see
+    # docs/research/REALISM_BOARD_LOG.md item 17) — until that exists, an
+    # exemption stated out loud beats a silent teleport.
+    dep = datetime.fromisoformat(flight["std"]) + timedelta(minutes=flight.get("delay_min", 0))
+    crew_at = _crew_position_before(state, crew_id, dep)
+    if not flight.get("is_ferry") and crew_at != flight["origin"]:
+        warnings.append({
+            "code": "CREW_WRONG_STATION",
+            "severity": "critical",
+            "message": (
+                f"Crew {crew['id']} ({crew['name']}) is at {crew_at}; "
+                f"{flight['callsign']} departs {flight['origin']}. They must be "
+                f"positioned there before they can operate it."
+            ),
+            "rule_ref": "Operational — crew positioning",
+        })
+
+    # ORO.FTL.235(a)/(b): minimum rest is "at least as long as the preceding
+    # duty period, or 12h at home base / 10h away, whichever is GREATER". A
+    # crew coming off a 14h duty may not report again after 12h just because
+    # 12 is the headline number.
+    away = flight["origin"] != crew.get("base", AIRLINE["hub"])
+    floor_hr = MIN_REST_AWAY_HR if away else MIN_REST_HOME_HR
+    prev_duty_hr = round(crew.get("last_duty_min", 0) / 60, 1)
+    required_rest_hr = max(floor_hr, prev_duty_hr)
+    # A crew who used commander's discretion may have their following rest
+    # reduced — ORO.FTL.205(f) — but never below the 10h hard floor.
+    if crew.get("rest_floor_next_hr"):
+        required_rest_hr = max(crew["rest_floor_next_hr"], DISCRETION_MIN_REST_AFTER_HR)
+    if crew["rest_hr_since_duty"] < required_rest_hr:
+        basis = (
+            f"the {prev_duty_hr:.1f}h duty just completed"
+            if prev_duty_hr > floor_hr
+            else f"the {floor_hr}h minimum {'down-route' if away else 'at home base'}"
+        )
         warnings.append({
             "code": "MIN_REST",
             "severity": "critical",
             "message": (
                 f"Insufficient rest. Crew {crew['id']} has had {crew['rest_hr_since_duty']:.1f}h rest; "
-                f"minimum {MIN_REST_HOME_HR}h required at home base before report."
+                f"{required_rest_hr:.1f}h required before report — set by {basis}."
             ),
             "rule_ref": "ORO.FTL.235 (Rest Periods)",
         })
@@ -827,11 +1129,18 @@ def check_assignment(state: dict, flight_id: str, crew_id: str) -> list[dict]:
     if not pairing_flights:
         pairing_flights = [flight]
     pairing_block = sum(pf["block_min"] for pf in pairing_flights)
-    # Add report (60min) + turnaround time(s) + post-flight (30min)
-    pairing_sectors = len(pairing_flights)
-    fdp_total = pairing_block + 60 + 30 + (pairing_sectors - 1) * 60  # 60-min turnaround per sector change
+    fdp_total, _sched, fdp_delay, pairing_sectors = _pairing_fdp_min(state, flight)
     projected_fdp = crew["fdp_used_min"] + fdp_total
-    fdp_max, basis = _fdp_cap_for_flight(flight)
+    fdp_max, basis = _fdp_cap_for_flight(
+        flight, sectors=pairing_sectors,
+        acclimatised=_crew_acclimatised(state, crew, flight))
+    standby_cut = _standby_fdp_reduction_min(crew)
+    if standby_cut:
+        fdp_max -= standby_cut
+        basis += (
+            f", less {standby_cut}min for home standby beyond "
+            f"{STANDBY_FDP_FREE_HR}h (CS FTL.1.225)"
+        )
     if projected_fdp > fdp_max:
         warnings.append({
             "code": "FDP_EXCEED",
@@ -841,6 +1150,7 @@ def check_assignment(state: dict, flight_id: str, crew_id: str) -> list[dict]:
                 f"{pairing_block//60}h{pairing_block%60:02d}m block) would reach "
                 f"{projected_fdp//60}h{projected_fdp%60:02d}m, exceeding the maximum "
                 f"{fdp_max//60}h FDP applicable ({basis})."
+                + (f" {fdp_delay}min of that is accumulated delay." if fdp_delay else "")
             ),
             "rule_ref": "ORO.FTL.205 / CS FTL.1.205",
         })
@@ -909,7 +1219,70 @@ def check_assignment(state: dict, flight_id: str, crew_id: str) -> list[dict]:
     return warnings
 
 
-def assign_crew(state: dict, flight_id: str, crew_id: str, force: bool = False) -> dict:
+# Criticals that no override reaches.
+#
+# TYPE_QUAL is deliberately NOT in this set. Force-assigning an unrated crew
+# applies and books an 80-point legality breach — the documented behaviour,
+# asserted by tests/test_occ_backend.py::test_assign_flow. A research pass
+# argued it should be unforceable (a type rating is a licensing fact under
+# FCL.740, not a commercial judgement, and discretion_available already
+# refuses to cover it). That is a design call for the owner; adding
+# "TYPE_QUAL" here is the whole change if he wants it.
+_UNFORCEABLE_CODES = {"REF_NOT_FOUND"}
+
+
+def discretion_available(state: dict, flight_id: str, crew_id: str) -> dict:
+    """Whether commander's discretion can legally cover this assignment, and
+    at what price. Returns `{available, cap_min, overrun_min, reportable,
+    augmented, reason}`.
+
+    Discretion covers FDP overruns and nothing else. A crew who is not type
+    rated, is sick, or is in the wrong place cannot be discretion-ed into
+    legality — those are not unforeseen circumstances, they are the roster
+    being wrong."""
+    flight = next((f for f in state["flights"] if f["id"] == flight_id), None)
+    crew = next((c for c in state["crew"] if c["id"] == crew_id), None)
+    if not flight or not crew:
+        return {"available": False, "reason": "Flight or crew reference not found."}
+
+    warnings = check_assignment(state, flight_id, crew_id)
+    critical = [w for w in warnings if w["severity"] == "critical"]
+    other = [w for w in critical if w["code"] not in ("FDP_EXCEED", "FDP_TIMEOUT")]
+    if other:
+        return {
+            "available": False,
+            "reason": (
+                "Discretion covers an FDP overrun only — "
+                + ", ".join(w["code"] for w in other) + " must be resolved."
+            ),
+        }
+    if not critical:
+        return {"available": False, "reason": "No FDP overrun to extend."}
+
+    req = flight.get("required_crew", {})
+    augmented = req.get("FO", 1) >= 2
+    cap = DISCRETION_MAX_MIN_AUGMENTED if augmented else DISCRETION_MAX_MIN
+    total, _sched, _delay, sectors = _pairing_fdp_min(state, flight)
+    fdp_max, _basis = _fdp_cap_for_flight(
+        flight, sectors=sectors, acclimatised=_crew_acclimatised(state, crew, flight))
+    overrun = (crew.get("fdp_used_min", 0) + total) - fdp_max
+    if overrun > cap:
+        return {
+            "available": False, "cap_min": cap, "overrun_min": overrun, "augmented": augmented,
+            "reason": (
+                f"Overrun is {overrun}min; commander's discretion is capped at "
+                f"{cap}min{' (augmented crew)' if augmented else ''}."
+            ),
+        }
+    return {
+        "available": True, "cap_min": cap, "overrun_min": overrun, "augmented": augmented,
+        "reportable": overrun > DISCRETION_REPORT_THRESHOLD_MIN,
+        "reason": None,
+    }
+
+
+def assign_crew(state: dict, flight_id: str, crew_id: str, force: bool = False,
+                discretion: bool = False) -> dict:
     """Assign a crew member to a flight. Returns {ok, warnings, breaches}.
     Short-haul out-and-back pairings: if this flight has siblings sharing
     `pairing_id`, the same crew is automatically rostered on the whole pairing
@@ -917,6 +1290,21 @@ def assign_crew(state: dict, flight_id: str, crew_id: str, force: bool = False) 
     """
     warnings = check_assignment(state, flight_id, crew_id)
     critical = [w for w in warnings if w["severity"] == "critical"]
+
+    unforceable = [w for w in critical if w["code"] in _UNFORCEABLE_CODES]
+    if unforceable:
+        return {"ok": False, "warnings": warnings, "applied": False,
+                "reason": unforceable[0]["message"]}
+
+    # Commander's discretion makes an FDP overrun LEGAL rather than a breach —
+    # within its cap, and at the price of a report and a shortened rest.
+    disc = discretion_available(state, flight_id, crew_id) if discretion else {"available": False}
+    if discretion and not disc["available"]:
+        return {"ok": False, "warnings": warnings, "applied": False,
+                "discretion": disc, "reason": disc.get("reason")}
+    if disc["available"]:
+        critical = []
+
     if critical and not force:
         return {"ok": False, "warnings": warnings, "applied": False}
 
@@ -940,11 +1328,26 @@ def assign_crew(state: dict, flight_id: str, crew_id: str, force: bool = False) 
     if critical and force:
         state["kpis"]["legality_breaches"] += len(critical)
         state["kpis"]["score"] -= 80 * len(critical)
+
+    if disc["available"]:
+        # Legal, but it leaves a trail and it costs the crew tomorrow.
+        crew["discretion_used"] = {
+            "minutes": disc["overrun_min"], "flight_id": flight_id,
+            "reportable": disc["reportable"], "at": state.get("clock"),
+        }
+        crew["fatigue_score"] = min(100, crew.get("fatigue_score", 0) + 12)
+        # Following rest may be reduced, but never below 10h.
+        crew["rest_floor_next_hr"] = DISCRETION_MIN_REST_AFTER_HR
+        if disc["reportable"]:
+            state["kpis"]["discretion_reports"] = state["kpis"].get("discretion_reports", 0) + 1
+        state["kpis"]["discretion_used_count"] = state["kpis"].get("discretion_used_count", 0) + 1
+
     return {
         "ok": True,
         "warnings": warnings,
         "applied": True,
         "pairing_sectors": len(pairing_flights),
+        "discretion": disc if disc["available"] else None,
     }
 
 
@@ -1260,6 +1663,172 @@ def _aircraft_position_before(state: dict, reg: str, before_dt: datetime, exclud
     return flights_for_reg[0]["origin"]
 
 
+def _crew_end_of_day_station(state: dict, crew: dict) -> str:
+    """Where a crew member is standing when the day ends — the destination of
+    the last thing that moved them, else wherever they already were."""
+    moves = []
+    for f in state["flights"]:
+        # Anything that has departed will end up at its destination, whether or
+        # not it has landed by the time the day rolls over — a 13-hour sector
+        # that is still airborne at midnight still leaves its crew in Singapore.
+        if crew["id"] in f.get("assigned_crew_ids", []) and f["status"] in (
+            "landed", "airborne", "diverted",
+        ):
+            moves.append((f["sta"], f["destination"]))
+    for pos in crew.get("positioning", []):
+        moves.append((pos["arrives"], pos["to"]))
+    if not moves:
+        return crew.get("station") or crew.get("base", AIRLINE["hub"])
+    moves.sort()
+    return moves[-1][1]
+
+
+def _crew_position_before(state: dict, crew_id: str, before_dt: datetime,
+                          exclude_pairing_id: str | None = None) -> str:
+    """Airport where `crew_id` is expected to be immediately before
+    `before_dt`, from their OTHER flying today. Mirrors
+    `_aircraft_position_before` — crew are as physically located as aircraft
+    are, and from day 2 the schedule has real outstation departures for them
+    to be stranded away from."""
+    crew = next((c for c in state["crew"] if c["id"] == crew_id), None)
+    # Start from where they actually are, which after an overnight is not
+    # necessarily home base.
+    base = (crew.get("station") or crew.get("base", AIRLINE["hub"])) if crew else AIRLINE["hub"]
+    sectors = sorted(
+        (f for f in state["flights"]
+         if crew_id in f.get("assigned_crew_ids", []) and f["status"] != "cancelled"
+         and f.get("pairing_id") != exclude_pairing_id),
+        key=lambda f: f["std"],
+    )
+    moves = [
+        (datetime.fromisoformat(f["sta"]) + timedelta(minutes=f.get("delay_min", 0)),
+         f["destination"])
+        for f in sectors
+    ]
+    # Positioning legs move the crew just as operated ones do — they are flown
+    # as passengers, but they still end up somewhere else.
+    if crew:
+        for pos in crew.get("positioning", []):
+            moves.append((datetime.fromisoformat(pos["arrives"]), pos["to"]))
+    completed = [m for m in moves if m[0] <= before_dt]
+    if completed:
+        completed.sort(key=lambda m: m[0])
+        return completed[-1][1]
+    return base
+
+
+# --- Positioning (deadhead), ORO.FTL.215 ------------------------------------
+# Crew flown as passengers to where they are needed. Sits ABOVE standby callout
+# in the real cost-efficient recovery hierarchy: cheaper than holding reserve,
+# dearer than swapping someone already on shift. Positioning after report but
+# before operating counts as FDP but NOT as a sector.
+# https://understandingeasa2016ftl.wordpress.com/easa-ftl/oro-ftl/oro-ftl-215-positioning/
+DEADHEAD_SEAT_USD = 450          # a seat on our own metal, revenue foregone
+DEADHEAD_HANDLING_USD = 900      # rebooking, ground transport, admin
+DEADHEAD_REPORT_BUFFER_MIN = 60  # must land this long before the duty reports
+
+
+def _deadhead_plan(state: dict, flight: dict, crew_id: str) -> dict | None:
+    """The sector that could carry `crew_id` to `flight`'s departure station in
+    time to operate it, or None if nothing connects.
+
+    Read-only. This is what turns "can I get a crew to MAD by 16:40" from a
+    button into a question with an answer."""
+    dep = datetime.fromisoformat(flight["std"]) + timedelta(minutes=flight.get("delay_min", 0))
+    latest_arrival = dep - timedelta(minutes=DEADHEAD_REPORT_BUFFER_MIN)
+    origin = _crew_position_before(state, crew_id, dep)
+    if origin == flight["origin"]:
+        return None                       # already there; nothing to position
+
+    now = datetime.fromisoformat(state["clock"])
+    best = None
+    for f in state["flights"]:
+        if f["id"] == flight["id"] or f["status"] in ("cancelled", "landed"):
+            continue
+        if f["origin"] != origin or f["destination"] != flight["origin"]:
+            continue
+        f_dep = datetime.fromisoformat(f["std"]) + timedelta(minutes=f.get("delay_min", 0))
+        f_arr = datetime.fromisoformat(f["sta"]) + timedelta(minutes=f.get("delay_min", 0))
+        if f_dep < now or f_arr > latest_arrival:
+            continue
+        if best is None or f_arr < best["arrives"]:
+            best = {
+                "carrier_flight_id": f["id"], "carrier_callsign": f["callsign"],
+                "from": origin, "to": flight["origin"],
+                "departs": f_dep.isoformat(), "arrives": f_arr,
+                "block_min": f["block_min"],
+            }
+    if best:
+        best["arrives"] = best["arrives"].isoformat()
+    return best
+
+
+def check_deadhead(state: dict, flight_id: str, crew_id: str | None = None) -> list[dict]:
+    """Legality of positioning a crew onto `flight_id`. Same `check_*`
+    contract as everything else."""
+    flight = next((f for f in state["flights"] if f["id"] == flight_id), None)
+    if not flight:
+        return [{"code": "REF_NOT_FOUND", "severity": "critical",
+                 "message": "Flight reference not found.", "rule_ref": "INTERNAL"}]
+
+    crew = None
+    if crew_id:
+        crew = next((c for c in state["crew"] if c["id"] == crew_id), None)
+    else:
+        crew = _find_recovery_crew(state, flight, ("available", "standby"),
+                                   ignore_position=True)
+    if not crew:
+        return [{
+            "code": "DH_NO_CREW", "severity": "critical",
+            "message": (
+                f"No legal crew rated {flight['required_crew']['type_qual']} available to "
+                f"position — positioning moves a crew, it does not create one."
+            ),
+            "rule_ref": "Operational — crew availability",
+        }]
+
+    plan = _deadhead_plan(state, flight, crew["id"])
+    if plan is None:
+        at = _crew_position_before(
+            state, crew["id"], datetime.fromisoformat(flight["std"]))
+        if at == flight["origin"]:
+            return []                     # already in position — nothing to do
+        return [{
+            "code": "DH_NO_CONNECTION", "severity": "critical",
+            "message": (
+                f"No sector gets {crew['id']} from {at} to {flight['origin']} at least "
+                f"{DEADHEAD_REPORT_BUFFER_MIN}min before {flight['callsign']} reports."
+            ),
+            "rule_ref": "Operational — positioning connection",
+        }]
+    return []
+
+
+def preview_deadhead(state: dict, flight_id: str, crew_id: str | None = None) -> dict:
+    """Read-only what-if for positioning a crew: who, on what, and the bill."""
+    warnings = check_deadhead(state, flight_id, crew_id)
+    has_critical = any(w["severity"] == "critical" for w in warnings)
+    flight = next((f for f in state["flights"] if f["id"] == flight_id), None)
+    if has_critical or not flight:
+        return {"warnings": warnings, "has_critical": has_critical,
+                "needs_positioning": False, "cost_usd": 0, "plan": None, "crew": None}
+
+    crew = (next((c for c in state["crew"] if c["id"] == crew_id), None) if crew_id
+            else _find_recovery_crew(state, flight, ("available", "standby"),
+                                     ignore_position=True))
+    plan = _deadhead_plan(state, flight, crew["id"]) if crew else None
+    if plan is None:
+        return {"warnings": warnings, "has_critical": False, "needs_positioning": False,
+                "cost_usd": 0, "plan": None,
+                "crew": {"id": crew["id"], "name": crew["name"], "rank": crew["rank"]} if crew else None}
+    return {
+        "warnings": warnings, "has_critical": False, "needs_positioning": True,
+        "cost_usd": DEADHEAD_SEAT_USD + DEADHEAD_HANDLING_USD,
+        "plan": plan,
+        "crew": {"id": crew["id"], "name": crew["name"], "rank": crew["rank"]},
+    }
+
+
 def check_aircraft_assignment(state: dict, pairing_id: str, reg: str) -> list[dict]:
     """Legality of putting tail `reg` on a pairing. Aircraft constraints are
     HARD (a physical aircraft cannot be the wrong type, be in two places, or
@@ -1273,7 +1842,26 @@ def check_aircraft_assignment(state: dict, pairing_id: str, reg: str) -> list[di
             "message": "Aircraft or rotation reference not found.", "rule_ref": "INTERNAL",
         }]
 
-    pairing_type = sectors[0]["aircraft_type"]
+    expired_mel = [m for m in ac.get("mel_items", []) if m.get("expired")]
+    if expired_mel:
+        cats = ", ".join(f"Cat {m['category']}" for m in expired_mel)
+        warnings.append({
+            "code": "AC_MEL_EXPIRED", "severity": "critical",
+            "message": (
+                f"{reg} has a deferred defect past its MEL limit ({cats}) — "
+                f"grounded until Maintenance Control clears it. Cannot dispatch."
+            ),
+            "rule_ref": "MEL deferral limit exceeded",
+        })
+
+    # Sectors already underway or finished keep whatever tail actually flew
+    # them — a reassignment can only ever move the REMAINING sectors of a
+    # pairing. This matters most for an out-and-back where the outbound has
+    # already landed and only the return leg still needs a tail (e.g. after
+    # the original aircraft goes tech mid-day): the completed leg must not
+    # block, or retroactively change tail on, the leg that's still ahead.
+    active_sectors = [s for s in sectors if s["status"] in _AC_ACTIVE_STATUSES]
+    pairing_type = (active_sectors or sectors)[0]["aircraft_type"]
     if ac["type"] != pairing_type:
         warnings.append({
             "code": "AC_TYPE_MISMATCH", "severity": "critical",
@@ -1284,27 +1872,30 @@ def check_aircraft_assignment(state: dict, pairing_id: str, reg: str) -> list[di
             "rule_ref": "Fleet / type compatibility",
         })
 
-    # A sector already underway or finished can't be re-tailed.
-    departed = [s for s in sectors if s["status"] not in _AC_ACTIVE_STATUSES]
-    if departed:
+    # Only a hard block when NOTHING is left to reassign — a pairing with at
+    # least one still-active sector is a legitimate mid-rotation tail swap.
+    if not active_sectors:
+        departed = sectors[-1]
         warnings.append({
             "code": "AC_DEPARTED", "severity": "critical",
             "message": (
-                f"{departed[0]['callsign']} is already {departed[0]['status']} — "
+                f"{departed['callsign']} is already {departed['status']} — "
                 f"the rotation is underway and cannot be reassigned to another tail."
             ),
             "rule_ref": "Operational — sector in progress",
         })
 
-    # Position + double-booking checks only make sense once the type matches.
-    if ac["type"] == pairing_type:
-        win_start, win_end = _pairing_window(sectors)
+    # Position + double-booking checks only make sense once the type matches
+    # and there's an active sector left to actually place the tail on.
+    if ac["type"] == pairing_type and active_sectors:
+        win_start, win_end = _pairing_window(active_sectors)
 
-        # Position: the tail must actually be at the rotation's departure
-        # station. An idle/spare tail sitting at the hub can't operate a
-        # rotation that departs from an outstation (e.g. a night-stopped
-        # long-haul aircraft's return leg).
-        pairing_origin = sectors[0]["origin"]
+        # Position: the tail must actually be at the (remaining) rotation's
+        # departure station. An idle/spare tail sitting at the hub can't
+        # operate a rotation that departs from an outstation (e.g. a
+        # night-stopped long-haul aircraft's return leg, or a return leg
+        # whose outbound already landed elsewhere).
+        pairing_origin = active_sectors[0]["origin"]
         position = _aircraft_position_before(state, reg, win_start, exclude_pairing_id=pairing_id)
         if position != pairing_origin:
             warnings.append({
@@ -1342,22 +1933,398 @@ def check_aircraft_assignment(state: dict, pairing_id: str, reg: str) -> list[di
     return warnings
 
 
+def _pending_aircraft_decision_incident(state: dict, pairing_id: str) -> dict | None:
+    """The open, clock-pausing TECH incident (if any) blocking this pairing —
+    i.e. the one a reassignment here would resolve."""
+    flight_ids = {s["id"] for s in _pairing_sectors(state, pairing_id)}
+    for inc in state.get("incidents", []):
+        if inc["status"] == "open" and inc.get("requires_aircraft_decision") \
+                and inc["flight_id"] in flight_ids:
+            return inc
+    return None
+
+
 def assign_aircraft(state: dict, pairing_id: str, reg: str) -> dict:
-    """Assign tail `reg` to every sector of a pairing. Hard constraints only —
-    a critical warning blocks the change (no force path)."""
+    """Assign tail `reg` to every REMAINING (not yet departed) sector of a
+    pairing. Hard constraints only — a critical warning blocks the change (no
+    force path). A sector that's already flown keeps its historical tail —
+    this can legitimately be a mid-rotation swap (e.g. the outbound landed
+    fine, the original tail then went tech, and the return leg needs a
+    different one).
+
+    If this pairing is under a grounded-aircraft incident (the sim is paused
+    for it — see is_clock_paused), this reassignment IS the resolution: the
+    choice is graded against the best feasible alternative at this moment
+    before it's applied, and the incident is closed, lifting the pause."""
     warnings = check_aircraft_assignment(state, pairing_id, reg)
     if any(w["severity"] == "critical" for w in warnings):
         return {"ok": False, "applied": False, "warnings": warnings,
                 "pairing_id": pairing_id, "reg": reg}
 
+    inc = _pending_aircraft_decision_incident(state, pairing_id)
+    # Grade BEFORE mutating — the what-if search needs the pre-swap world.
+    grade = _grade_aircraft_decision(state, pairing_id, reg) if inc else None
+
     sectors = _pairing_sectors(state, pairing_id)
-    previous = sectors[0]["aircraft_reg"] if sectors else None
-    for s in sectors:
+    active_sectors = [s for s in sectors if s["status"] in _AC_ACTIVE_STATUSES]
+    previous = (active_sectors or sectors)[0]["aircraft_reg"] if sectors else None
+    for s in active_sectors:
         s["aircraft_reg"] = reg
-    return {
+
+    result = {
         "ok": True, "applied": True, "warnings": warnings,
         "pairing_id": pairing_id, "reg": reg, "previous_reg": previous,
     }
+
+    if inc:
+        inc["status"] = "resolved"
+        inc["resolution"] = "aircraft_control_reassign"
+        inc["resolution_label"] = f"Reassigned to {reg} via Aircraft Control"
+        inc["resolution_note"] = f"Aircraft swapped to {reg}."
+        inc["resolved_at"] = state["clock"]
+        inc["decision_grade"] = grade
+        state["decisions_log"].append({
+            "ts": state["clock"], "incident_id": inc["id"],
+            "action": "aircraft_control_reassign", "cost_usd": 0, "otp_hit": 0,
+        })
+        result["incident_resolved"] = inc["id"]
+        result["decision_grade"] = grade
+
+    return result
+
+
+def _is_tail_fully_free(state: dict, reg: str) -> bool:
+    """True if `reg` has no active-status commitment anywhere in the day —
+    the bar for being sent off empty on a positioning flight. A tail that's
+    still mid-rotation elsewhere can't also be ferried."""
+    return not any(
+        f["aircraft_reg"] == reg and f["status"] in _AC_ACTIVE_STATUSES
+        for f in state["flights"]
+    )
+
+
+def _curfew_clear_end(dt: datetime) -> datetime:
+    """The next moment at/after `dt` (which must fall inside the LHR night
+    curfew, 23:00-06:00Z wrapping midnight) when the curfew is no longer in
+    effect."""
+    end = dt.replace(hour=CURFEW_END_HOUR, minute=0, second=0, microsecond=0)
+    if dt.hour >= CURFEW_START_HOUR:
+        end += timedelta(days=1)
+    return end
+
+
+def _ferry_schedule_avoiding_curfew(
+    origin: str, dest: str, earliest_std: datetime, block_min: int
+) -> tuple[datetime, datetime]:
+    """A positioning flight's (std, sta), pushed later if needed so neither
+    end touches the LHR night curfew — a curfew means no aircraft movements
+    at all, takeoff or landing, not just a fine to pay, so a deliberately
+    planned ferry has to be scheduled around it. Every route in this network
+    touches LHR at exactly one end, so at most one adjustment is ever
+    needed (departure-side OR arrival-side, never both)."""
+    std = earliest_std
+    if origin == CURFEW_AIRPORT and _in_curfew_window(std):
+        std = _curfew_clear_end(std)
+    sta = std + timedelta(minutes=block_min)
+    if dest == CURFEW_AIRPORT and _in_curfew_window(sta):
+        std = max(std, _curfew_clear_end(sta) - timedelta(minutes=block_min))
+        sta = std + timedelta(minutes=block_min)
+    return std, sta
+
+
+def _ferry_cost(ac_type: str, block_min: int) -> int:
+    """What an empty positioning flight costs to run: a fixed dispatch fee
+    (slot, handling, crew callout) plus a per-minute rate scaling with the
+    type's fuel burn. Single source of truth so the price previewed before
+    the decision is exactly the price charged after it."""
+    return FERRY_DISPATCH_FEE_USD + block_min * FERRY_COST_PER_MIN_USD.get(ac_type, 15)
+
+
+def _ferry_plan(state: dict, pairing_id: str, reg: str) -> dict | None:
+    """If tail `reg` needs repositioning to operate `pairing_id`'s open
+    leg(s), the planned (curfew-adjusted, crew not yet assigned) positioning
+    flight — else None if it's already at the right station. Read-only."""
+    sectors = _pairing_sectors(state, pairing_id)
+    active_sectors = [s for s in sectors if s["status"] in _AC_ACTIVE_STATUSES]
+    ac = next((a for a in state.get("fleet", FLEET) if a["reg"] == reg), None)
+    if not active_sectors or not ac:
+        return None
+    pairing_origin = active_sectors[0]["origin"]
+    now = datetime.fromisoformat(state["clock"])
+    current_position = _aircraft_position_before(state, reg, now, exclude_pairing_id=pairing_id)
+    if current_position == pairing_origin:
+        return None
+    block = _route_block_min(current_position, pairing_origin)
+    std, sta = _ferry_schedule_avoiding_curfew(current_position, pairing_origin, now, block)
+    return {
+        "id": _hash_id("FLT"),
+        "callsign": f"POS{reg.replace('-', '')}",
+        "origin": current_position, "destination": pairing_origin,
+        "std": std.isoformat(), "sta": sta.isoformat(), "block_min": block,
+        "aircraft_reg": reg, "aircraft_type": ac["type"], "status": "scheduled",
+        "delay_min": 0, "reactionary_min": 0, "pax_count": 0, "assigned_crew_ids": [],
+        # A positioning flight carries no cabin crew (no pax) but DOES need a
+        # minimum flight deck: one Captain, one First Officer.
+        "required_crew": {"CP": 1, "FO": 1, "SC": 0, "CC": 0, "type_qual": ac["type"]},
+        "pairing_id": None, "note": "POSITIONING FLIGHT (empty ferry)", "is_ferry": True,
+    }
+
+
+def _find_ferry_crew(state: dict, ferry_flight: dict) -> tuple[dict | None, dict | None]:
+    """Legal (available/standby, freshest-fatigue-first) Captain and First
+    Officer for a ferry's flight-deck-only crew — reuses check_assignment,
+    the same EASA-FTL-inspired legality machinery (rest, FDP, 7d/28d duty,
+    consecutive days) applied to any other duty. The ferry flight must
+    temporarily be visible in state["flights"] for the overlap/FDP checks to
+    see it; always removed again before returning — read-only overall."""
+    state["flights"].append(ferry_flight)
+    try:
+        cp = _legal_candidates(state, ferry_flight, "CP", ("available", "standby"))
+        fo = _legal_candidates(state, ferry_flight, "FO", ("available", "standby"))
+    finally:
+        state["flights"].remove(ferry_flight)
+    return (cp[0] if cp else None), (fo[0] if fo else None)
+
+
+def check_ferry(state: dict, pairing_id: str, reg: str) -> list[dict]:
+    """Legality of ferrying tail `reg` EMPTY to reposition it onto
+    `pairing_id`. Deliberately does NOT apply check_aircraft_assignment's
+    position check — being in the wrong place is exactly the problem this
+    exists to solve. Still hard on type, MEL grounding, an already-fully-flown
+    pairing, requires the tail be genuinely free to send, AND — since flying
+    it anywhere needs a minimum flight-deck crew — requires a legal (FTL
+    and rest-compliant) Captain and First Officer to actually be available
+    for the positioning flight itself, curfew-adjusted timing included."""
+    sectors = _pairing_sectors(state, pairing_id)
+    ac = next((a for a in state.get("fleet", FLEET) if a["reg"] == reg), None)
+    if not sectors or not ac:
+        return [{
+            "code": "REF_NOT_FOUND", "severity": "critical",
+            "message": "Aircraft or rotation reference not found.", "rule_ref": "INTERNAL",
+        }]
+
+    warnings: list[dict] = []
+    expired_mel = [m for m in ac.get("mel_items", []) if m.get("expired")]
+    if expired_mel:
+        cats = ", ".join(f"Cat {m['category']}" for m in expired_mel)
+        warnings.append({
+            "code": "AC_MEL_EXPIRED", "severity": "critical",
+            "message": (
+                f"{reg} has a deferred defect past its MEL limit ({cats}) — "
+                f"grounded until Maintenance Control clears it. Cannot dispatch."
+            ),
+            "rule_ref": "MEL deferral limit exceeded",
+        })
+
+    active_sectors = [s for s in sectors if s["status"] in _AC_ACTIVE_STATUSES]
+    if not active_sectors:
+        departed = sectors[-1]
+        warnings.append({
+            "code": "AC_DEPARTED", "severity": "critical",
+            "message": (
+                f"{departed['callsign']} is already {departed['status']} — "
+                f"the rotation is underway and there's nothing left to ferry onto."
+            ),
+            "rule_ref": "Operational — sector in progress",
+        })
+        return warnings
+
+    pairing_type = active_sectors[0]["aircraft_type"]
+    if ac["type"] != pairing_type:
+        warnings.append({
+            "code": "AC_TYPE_MISMATCH", "severity": "critical",
+            "message": (
+                f"{reg} is a {ac['type']}; this rotation needs a {pairing_type}. "
+                f"A ferry repositions an aircraft — it can't change its type."
+            ),
+            "rule_ref": "Fleet / type compatibility",
+        })
+
+    if not _is_tail_fully_free(state, reg):
+        warnings.append({
+            "code": "AC_FERRY_BUSY", "severity": "critical",
+            "message": f"{reg} is already committed to other flying today — it can't be freed for a positioning flight.",
+            "rule_ref": "Operational — aircraft double-booking",
+        })
+
+    if any(w["severity"] == "critical" for w in warnings):
+        return warnings
+
+    plan = _ferry_plan(state, pairing_id, reg)
+    if plan is None:
+        return warnings  # already at the right station — no ferry needed, nothing more to check
+
+    now = datetime.fromisoformat(state["clock"])
+    std = datetime.fromisoformat(plan["std"])
+    if std > now:
+        delay = int((std - now).total_seconds() // 60)
+        warnings.append({
+            "code": "FERRY_CURFEW_DELAY", "severity": "warning",
+            "message": (
+                f"LHR night curfew pushes this positioning flight's departure to "
+                f"{std.strftime('%H:%MZ')} ({delay}min later than the earliest possible) — "
+                f"no movements are permitted {CURFEW_START_HOUR:02d}:00-{CURFEW_END_HOUR:02d}:00Z."
+            ),
+            "rule_ref": "Operational — LHR night curfew",
+        })
+
+    cp, fo = _find_ferry_crew(state, plan)
+    if not cp:
+        warnings.append({
+            "code": "FERRY_NO_CAPTAIN", "severity": "critical",
+            "message": (
+                f"No legal Captain (available/standby, {ac['type']}-rated, within FTL rest/duty "
+                f"limits) for a {plan['block_min']}min positioning flight departing "
+                f"{std.strftime('%H:%MZ')}. A ferry needs a minimum flight-deck crew of two."
+            ),
+            "rule_ref": "ORO.FTL.205 — minimum flight-deck crew",
+        })
+    if not fo:
+        warnings.append({
+            "code": "FERRY_NO_FO", "severity": "critical",
+            "message": (
+                f"No legal First Officer (available/standby, {ac['type']}-rated, within FTL rest/duty "
+                f"limits) for a {plan['block_min']}min positioning flight departing "
+                f"{std.strftime('%H:%MZ')}. A ferry needs a minimum flight-deck crew of two."
+            ),
+            "rule_ref": "ORO.FTL.205 — minimum flight-deck crew",
+        })
+
+    return warnings
+
+
+def preview_ferry(state: dict, pairing_id: str, reg: str) -> dict:
+    """Read-only what-if for the ferry decision: legality warnings plus the
+    price of the positioning flight, so the player sees what an empty
+    repositioning actually costs BEFORE committing to it — the same way
+    reset-to-zero previews its cancellation bill. Never mutates real state.
+
+    cost_usd is 0 when needs_ferry is False: the tail is already at the right
+    station, so a plain reassignment does the job and no ferry is flown."""
+    warnings = check_ferry(state, pairing_id, reg)
+    has_critical = any(w["severity"] == "critical" for w in warnings)
+
+    plan = None if has_critical else _ferry_plan(state, pairing_id, reg)
+    if plan is None:
+        return {
+            "warnings": warnings, "has_critical": has_critical,
+            "needs_ferry": False, "cost_usd": 0, "ferry_flight": None,
+        }
+
+    # The cash figure is the small half of what a ferry costs. It also burns a
+    # Captain and an FO out of a standby bank that is only four pilots deep —
+    # spending your last legal standby Captain on an empty sector at 14:00 is
+    # the decision that actually hurts, and the player could not see it.
+    cp, fo = _find_ferry_crew(state, plan)
+    remaining = {
+        rank: sum(1 for c in state["crew"]
+                  if c["rank"] == rank and c["status"] == "standby"
+                  and c["id"] not in {cp["id"] if cp else None, fo["id"] if fo else None})
+        for rank in ("CP", "FO")
+    }
+    return {
+        "warnings": warnings, "has_critical": has_critical,
+        "needs_ferry": True,
+        "cost_usd": _ferry_cost(plan["aircraft_type"], plan["block_min"]),
+        "ferry_flight": {
+            "callsign": plan["callsign"], "origin": plan["origin"],
+            "destination": plan["destination"], "std": plan["std"],
+            "sta": plan["sta"], "block_min": plan["block_min"],
+        },
+        "crew": {
+            "captain": f"{cp['id']} {cp['name']}" if cp else None,
+            "first_officer": f"{fo['id']} {fo['name']}" if fo else None,
+            "fdp_consumed_min": plan["block_min"],
+            "standby_remaining": remaining,
+        },
+    }
+
+
+def ferry_spare_aircraft(state: dict, pairing_id: str, reg: str) -> dict:
+    """Dispatch tail `reg` EMPTY (a positioning/ferry flight, zero pax, no
+    revenue) from wherever it currently is to the station this pairing's
+    remaining sectors need it at, crewed by a legal Captain + First Officer,
+    then hand those sectors to it. The ferry is recorded as a real flight —
+    so the existing reactionary-delay engine naturally works out how much
+    the pairing has to wait for it to land (no separate delay math needed
+    here), and its crew accrue FDP/duty exactly like any other flight when
+    it actually lands during tick() — no special-casing needed there either.
+
+    Real-world grounding: dispatching a reserve/spare aircraft empty to cover
+    a stranded rotation is a genuine (if expensive, last-resort) OCC recovery
+    lever — see docs/research/Aircraft-Fleet-Management-Research.md §3."""
+    warnings = check_ferry(state, pairing_id, reg)
+    if any(w["severity"] == "critical" for w in warnings):
+        return {"ok": False, "applied": False, "warnings": warnings, "pairing_id": pairing_id, "reg": reg}
+
+    sectors = _pairing_sectors(state, pairing_id)
+    active_sectors = [s for s in sectors if s["status"] in _AC_ACTIVE_STATUSES]
+
+    inc = _pending_aircraft_decision_incident(state, pairing_id)
+    # Grade BEFORE mutating — the what-if search needs the pre-ferry world.
+    grade = _grade_aircraft_decision(state, pairing_id, reg) if inc else None
+
+    ac = next((a for a in state.get("fleet", FLEET) if a["reg"] == reg), None)
+    ferry_flight = _ferry_plan(state, pairing_id, reg)
+    crew_names = None
+    ferry_cost = 0
+    if ferry_flight is not None:
+        ferry_cost = _ferry_cost(ac["type"], ferry_flight["block_min"])
+        state["kpis"]["cost_usd"] += ferry_cost
+        state["flights"].append(ferry_flight)
+        cp, fo = _find_ferry_crew(state, ferry_flight)
+        # check_ferry already confirmed both exist; re-validated here as an
+        # internal consistency guard rather than trusted blindly.
+        if not cp or not fo:
+            state["flights"].remove(ferry_flight)
+            return {"ok": False, "applied": False,
+                    "warnings": [{"code": "INTERNAL", "severity": "critical",
+                                   "message": "Ferry crew became unavailable between check and dispatch.",
+                                   "rule_ref": "INTERNAL"}],
+                    "pairing_id": pairing_id, "reg": reg}
+        for crew in (cp, fo):
+            assign_crew(state, ferry_flight["id"], crew["id"])
+            crew["status"] = "on_duty"
+        crew_names = f"{cp['id']} {cp['name']} (CP) / {fo['id']} {fo['name']} (FO)"
+
+    previous = active_sectors[0]["aircraft_reg"]
+    for s in active_sectors:
+        s["aircraft_reg"] = reg
+
+    reset_reactionary_delays(state)
+    _log_cascade(state, propagate_reactionary_delays(state), "ferry", pairing_id)
+    _recompute_kpis(state)
+
+    result = {
+        "ok": True, "applied": True, "warnings": warnings,
+        "pairing_id": pairing_id, "reg": reg, "previous_reg": previous,
+        "ferry_flight": ferry_flight, "cost_usd": ferry_cost,
+    }
+
+    if inc:
+        if ferry_flight:
+            note = (
+                f"Empty positioning flight {ferry_flight['callsign']} dispatched "
+                f"{ferry_flight['origin']}→{ferry_flight['destination']} "
+                f"({ferry_flight['block_min']}min), crewed by {crew_names}. "
+                f"Cost: ${ferry_cost:,}."
+            )
+        else:
+            note = f"Aircraft swapped to {reg}."
+        inc["status"] = "resolved"
+        inc["resolution"] = "aircraft_control_ferry"
+        inc["resolution_label"] = f"Ferried {reg} via Aircraft Control"
+        inc["resolution_note"] = note
+        inc["resolved_at"] = state["clock"]
+        inc["decision_grade"] = grade
+        state["decisions_log"].append({
+            "ts": state["clock"], "incident_id": inc["id"],
+            "action": "aircraft_control_ferry", "cost_usd": ferry_cost, "otp_hit": 0,
+        })
+        result["incident_resolved"] = inc["id"]
+        result["decision_grade"] = grade
+
+    return result
 
 
 def aircraft_control(state: dict) -> dict:
@@ -1406,7 +2373,17 @@ def aircraft_control(state: dict) -> dict:
             "block_min": sum(s["block_min"] for s in secs),
             "pax": sum(s.get("pax_count", 0) for s in secs),
             "status": _pairing_status(secs),
-            "reassignable": all(s["status"] in _AC_ACTIVE_STATUSES for s in secs),
+            "reactionary_min": sum(s.get("reactionary_min", 0) for s in secs),
+            # Worst delay on any sector — the UI tones the rotation off this so
+            # a 90-minute-down rotation reads the same colour here as it does
+            # on the timeline and the roster board.
+            "delay_min": max((s.get("delay_min", 0) for s in secs), default=0),
+            # At least one sector still ahead of the tail — a rotation isn't
+            # locked out just because an earlier leg in the same pairing has
+            # already flown (see check_aircraft_assignment/assign_aircraft).
+            "reassignable": any(s["status"] in _AC_ACTIVE_STATUSES for s in secs),
+            # Whether reset_to_zero has anything left in this pairing to cancel.
+            "resettable": any(s["status"] in ("scheduled", "delayed", "boarding") for s in secs),
         }
         rotations.append(rot)
         by_reg_rotations.setdefault(secs[0]["aircraft_reg"], []).append(rot)
@@ -1416,7 +2393,11 @@ def aircraft_control(state: dict) -> dict:
     for ac in fleet:
         rots = sorted(by_reg_rotations.get(ac["reg"], []), key=lambda r: r["std"])
         block = sum(r["block_min"] for r in rots)
-        if not rots:
+        mel_items = ac.get("mel_items", [])
+        grounded = any(m.get("expired") for m in mel_items)
+        if grounded and not rots:
+            status = "grounded"
+        elif not rots:
             status = "spare" if ac.get("spare") else "idle"
         elif all(r["status"] == "landed" for r in rots):
             status = "day done"
@@ -1430,6 +2411,8 @@ def aircraft_control(state: dict) -> dict:
             "reg": ac["reg"],
             "type": ac["type"],
             "spare": bool(ac.get("spare")),
+            "mel_items": mel_items,
+            "grounded": grounded,
             "rotation_count": len(rots),
             "sectors": sum(r["sectors"] for r in rots),
             "block_min": block,
@@ -1442,6 +2425,188 @@ def aircraft_control(state: dict) -> dict:
         "fleet": fleet_view,
         "rotations": rotations,
         "min_turnaround_min": MIN_TURNAROUND_MIN,
+        "hub": AIRLINE["hub"],
+    }
+
+
+_RTZ_CANCELLABLE_STATUSES = ("scheduled", "delayed", "boarding")
+
+
+def _network_reactionary_total(state: dict, exclude_ids: set[str] | None = None) -> int:
+    """Total knock-on minutes across the network.
+
+    `exclude_ids` drops specific flights from the count. Reset-to-zero needs
+    this: a cancelled sector contributes zero reactionary minutes afterwards,
+    so counting it on both sides of the before/after would credit the player
+    for deleting the delay on the very flights they deleted. Only relief felt
+    ELSEWHERE in the network is a benefit of the decision."""
+    ex = exclude_ids or set()
+    return sum(f.get("reactionary_min", 0) for f in state["flights"] if f["id"] not in ex)
+
+
+def _sectors_relieved(before: list[dict], after: list[dict], exclude_ids: set[str]) -> int:
+    """How many OTHER rotations actually got their knock-on delay cut. The
+    number that tells the story a minute-total cannot: did this help anyone?"""
+    after_by_id = {f["id"]: f.get("reactionary_min", 0) for f in after}
+    return sum(
+        1 for f in before
+        if f["id"] not in exclude_ids
+        and after_by_id.get(f["id"], 0) < f.get("reactionary_min", 0)
+    )
+
+
+def check_reset_to_zero(state: dict, pairing_ids: list[str]) -> list[dict]:
+    """Feasibility check for a reset-to-zero action: pre-emptively
+    cancelling a whole block of pairings in one deliberate move, rather
+    than reacting to each one's incident individually. Unlike a normal
+    incident cancellation, this isn't gated on an open incident at all —
+    it's a standing option any time the network is going bad enough that
+    resyncing the whole fleet beats digging out pairing by pairing."""
+    warnings: list[dict] = []
+    if not pairing_ids:
+        warnings.append({
+            "code": "RTZ_EMPTY", "severity": "critical",
+            "message": "No pairings selected to reset.", "rule_ref": "INTERNAL",
+        })
+        return warnings
+    for pid in pairing_ids:
+        sectors = _pairing_sectors(state, pid)
+        if not sectors:
+            warnings.append({
+                "code": "REF_NOT_FOUND", "severity": "critical",
+                "message": f"Pairing {pid} not found.", "rule_ref": "INTERNAL",
+            })
+            continue
+        if not any(s["status"] in _RTZ_CANCELLABLE_STATUSES for s in sectors):
+            warnings.append({
+                "code": "RTZ_NOTHING_TO_CANCEL", "severity": "critical",
+                "message": (
+                    f"{sectors[0]['callsign']} pairing has nothing left to cancel "
+                    f"— every sector is already flown or cancelled."
+                ),
+                "rule_ref": "Operational",
+            })
+    return warnings
+
+
+def preview_reset_to_zero(state: dict, pairing_ids: list[str]) -> dict:
+    """Read-only what-if for the reset-to-zero decision: the guaranteed cost
+    (cancellation + pax disruption, same per-sector/per-pax rate as any
+    single cancellation) against the network reactionary-delay minutes
+    avoided by resyncing the whole fleet on a scratch copy. Never mutates
+    real state — this is the trade-off the player sees before committing."""
+    warnings = check_reset_to_zero(state, pairing_ids)
+    scratch = {"flights": copy.deepcopy(state["flights"])}
+    cancel_sectors = 0
+    cancel_pax = 0
+    cancelled_ids: set[str] = set()
+    for pid in pairing_ids:
+        for f in scratch["flights"]:
+            if f.get("pairing_id") == pid and f["status"] in _RTZ_CANCELLABLE_STATUSES:
+                cancel_sectors += 1
+                cancel_pax += f.get("pax_count", 0)
+                cancelled_ids.add(f["id"])
+                f["status"] = "cancelled"
+    before_total = _network_reactionary_total(state, cancelled_ids)
+    before_snapshot = copy.deepcopy(state["flights"])
+    reset_reactionary_delays(scratch)
+    propagate_reactionary_delays(scratch)
+    after_total = _network_reactionary_total(scratch, cancelled_ids)
+    cost = 15000 * cancel_sectors + cancel_pax * 280
+    comp = _cancellation_compensation_due(state, cancelled_ids)
+    care = sum(
+        f.get("pax_count", 0) * (CARE_MEAL_USD_PER_PAX + CARE_HOTEL_USD_PER_PAX)
+        for f in state["flights"]
+        if f["id"] in cancelled_ids and not f.get("care_charged")
+    )
+    return {
+        "warnings": warnings,
+        "has_critical": any(w["severity"] == "critical" for w in warnings),
+        "cancel_sectors": cancel_sectors,
+        "cancel_pax": cancel_pax,
+        "cost_usd": cost + comp + care,
+        "cancellation_cost_usd": cost,
+        "compensation_usd": comp,
+        "duty_of_care_usd": care,
+        "network_reactionary_before_min": before_total,
+        "network_reactionary_after_min": after_total,
+        "reactionary_avoided_min": max(0, before_total - after_total),
+        "sectors_relieved": _sectors_relieved(before_snapshot, scratch["flights"], cancelled_ids),
+    }
+
+
+def reset_to_zero(state: dict, pairing_ids: list[str]) -> dict:
+    """Pre-emptively cancel a whole block of pairings in one deliberate move
+    to resynchronize the fleet with reality, rather than digging out
+    incident-by-incident — the real "reset to zero" IROPS recovery tactic
+    (Southwest, 26 Dec 2022; see
+    docs/research/Aircraft-Fleet-Management-Research.md §5). Trades
+    guaranteed up-front pain (the same per-sector/per-pax cancellation cost
+    as any single cancellation) for stopping a compounding reactionary-delay
+    cascade before it gets worse.
+
+    Reactionary delay is rebuilt from scratch across the WHOLE network
+    afterward, not just the cancelled pairings — freeing up a tail or crew
+    that was stuck behind a late inbound which no longer exists can clear
+    knock-on delay on completely unrelated rotations too, which is the
+    entire point of the tactic."""
+    warnings = check_reset_to_zero(state, pairing_ids)
+    if any(w["severity"] == "critical" for w in warnings):
+        return {"ok": False, "applied": False, "warnings": warnings, "pairing_ids": pairing_ids}
+
+    cancelled_flight_ids: list[str] = []
+    total_pax = 0
+    released: set[str] = set()
+    for pid in pairing_ids:
+        for s in _pairing_sectors(state, pid):
+            if s["status"] not in _RTZ_CANCELLABLE_STATUSES:
+                continue
+            s["status"] = "cancelled"
+            cancelled_flight_ids.append(s["id"])
+            total_pax += s.get("pax_count", 0)
+            for cid in list(s["assigned_crew_ids"]):
+                s["assigned_crew_ids"].remove(cid)
+                released.add(cid)
+
+    for cid in released:
+        c = next((cc for cc in state["crew"] if cc["id"] == cid), None)
+        if c and not any(cid in f["assigned_crew_ids"] for f in state["flights"]):
+            c["assigned_flight_id"] = None
+            if c["status"] == "on_duty":
+                c["status"] = "available"
+
+    cancelled_ids = set(cancelled_flight_ids)
+    before_total = _network_reactionary_total(state, cancelled_ids)
+    before_snapshot = copy.deepcopy(state["flights"])
+
+    cancel_cost = 15000 * len(cancelled_flight_ids) + total_pax * 280
+    state["kpis"]["cost_usd"] += cancel_cost
+    state["kpis"]["pax_disrupted"] += total_pax
+    state["kpis"]["pax_delay_min"] += CANCEL_DELAY_EQUIVALENT_MIN_PER_PAX * total_pax
+    cancelled_flights = [f for f in state["flights"] if f["id"] in cancelled_ids]
+    comp = _charge_cancellation_compensation(state, cancelled_flights)
+    care = _charge_cancellation_care(state, cancelled_flights)
+    cost = cancel_cost + comp + care
+
+    reset_reactionary_delays(state)
+    _log_cascade(state, propagate_reactionary_delays(state), "reset_to_zero")
+    _recompute_kpis(state)
+    after_total = _network_reactionary_total(state, cancelled_ids)
+
+    state["decisions_log"].append({
+        "ts": state["clock"], "incident_id": f"RESET-TO-ZERO ({len(pairing_ids)} pairings)",
+        "action": "reset_to_zero", "cost_usd": cost, "otp_hit": 0,
+    })
+
+    return {
+        "ok": True, "applied": True, "warnings": warnings,
+        "pairing_ids": pairing_ids, "cancelled_flight_ids": cancelled_flight_ids,
+        "cost_usd": cost, "cancellation_cost_usd": cancel_cost,
+        "compensation_usd": comp, "duty_of_care_usd": care,
+        "pax_disrupted": total_pax,
+        "reactionary_avoided_min": max(0, before_total - after_total),
+        "sectors_relieved": _sectors_relieved(before_snapshot, state["flights"], cancelled_ids),
+        "kpis": state["kpis"],
     }
 
 
@@ -1480,6 +2645,10 @@ INCIDENT_META = {
     "TECH":        {"desk": "MX CONTROL",   "delay_code": "41"},
     "WEATHER":     {"desk": "DISPATCH",     "delay_code": "72"},
     "ATC_FLOW":    {"desk": "NETWORK/ATC",  "delay_code": "81"},
+    # Not randomly spawned — raised by the operation itself when accumulated
+    # delay pushes a rostered crew past their FDP cap. IATA 63 is crew-shortage
+    # rotation delay, which is what a timed-out duty becomes.
+    "CREW_HOURS":  {"desk": "CREW CONTROL", "delay_code": "63"},
 }
 
 # The operation never pauses for a problem — but a problem you sit on gets
@@ -1490,11 +2659,50 @@ INCIDENT_META = {
 ESCALATION_AFTER_MIN = 60
 ESCALATION_EXTRA_DELAY_MIN = 30
 
+# MEL (Minimum Equipment List) deferral categories. Real MELs run A/B/C/D with
+# day-limits of item-specific/3/10/120 respectively; this sim uses B and C
+# (A has no fixed interval to model, and D's 120-day window never matters at
+# game timescales). A deferred defect stays on the TAIL, not the flight, and
+# travels with it across days until an engineer clears it or the limit is hit.
+MEL_CATEGORY_LIMITS_DAYS = {"B": 3, "C": 10}
+MEL_CATEGORY_WEIGHTS = {"B": 0.3, "C": 0.7}
+# Fraction of open, unexpired MEL items an overnight engineering shift
+# rectifies before the next day's ops — most defects get fixed at the next
+# opportunity rather than riding the full deferral window.
+MEL_OVERNIGHT_CLEAR_PROB = 0.7
+
+# A MAJOR tech defect is not MEL-deferrable (see mel_defer's feasibility gate)
+# and cannot simply be held for — the tail is physically unusable. Rather than
+# offer a one-click "swap from nearest spare" shortcut, this kind of incident
+# sets `requires_aircraft_decision` on itself: the whole sim clock freezes
+# (see is_clock_paused / tick) until the player either reassigns a real tail
+# via the Aircraft Control desk (any legally clean tail, not just a spare) or
+# cancels the rotation from the incident queue. Whichever they pick is graded
+# against the best feasible alternative — see _grade_aircraft_decision.
+CANCEL_DELAY_EQUIVALENT_MIN_PER_PAX = 240  # matches the cancellation pax-delay convention used elsewhere
+DECISION_GOOD_THRESHOLD_MIN = 15  # within this many minutes of optimal still grades as GOOD, not SUBOPTIMAL
+
 # EU261/UK261-style passenger compensation: due when a flight ARRIVES 3h+
 # late, per passenger, scaled by haul — UNLESS the root cause is an
 # "extraordinary circumstance" outside the airline's control (weather, ATC),
 # mirroring the real regulation. This is what makes delay-vs-cancel a genuine
 # economic decision in a real OCC.
+# --- Article 9 duty of care -------------------------------------------------
+# Art. 7 COMPENSATION is defeated by extraordinary circumstances. Art. 9 CARE
+# is not: McDonagh v Ryanair (C-12/11) held the Eyjafjallajokull airspace
+# closure created no "super-extraordinary" exemption, and that EU law places
+# no temporal or monetary limit on the duty of care. So a weather day still
+# bleeds cash even when no compensation is owed — without this, accepting
+# delay is strictly dominant whenever the cause is weather or ATC.
+# https://www.legislation.gov.uk/eur/2004/261/article/9
+CARE_DELAY_THRESHOLD_SHORT_MIN = 120   # <=1500km
+CARE_DELAY_THRESHOLD_MED_MIN = 180     # intra-EU >1500km / 1500-3500km
+CARE_DELAY_THRESHOLD_LONG_MIN = 240    # everything else
+CARE_MEAL_USD_PER_PAX = 22             # meals and refreshments
+CARE_HOTEL_USD_PER_PAX = 145           # room plus airport transfer
+# Past this, an onward departure is no longer realistic today and the airline
+# is accommodating passengers overnight.
+CARE_OVERNIGHT_DELAY_MIN = 420
 COMP_ARR_DELAY_THRESHOLD_MIN = 180
 COMP_SHORT_HAUL_USD = 250   # ≈ £220 per pax
 COMP_LONG_HAUL_USD = 600    # ≈ £520 per pax
@@ -1591,10 +2799,130 @@ def _maybe_charge_compensation(state: dict, flight: dict) -> dict | None:
     }
 
 
+def _cancellation_compensation_due(state: dict, flight_ids) -> int:
+    """UK261/EU261 Art. 7 exposure for cancelling these sectors, WITHOUT
+    charging it. Cancelling under 14 days' notice owes compensation exactly as
+    a long delay does; only an extraordinary-circumstances cause exempts it.
+    Read-only so the preview can price the real bill before the player
+    commits."""
+    ids = set(flight_ids)
+    total = 0
+    for f in state["flights"]:
+        if f["id"] not in ids or f.get("comp_charged") or f.get("comp_exempt"):
+            continue
+        rate = COMP_LONG_HAUL_USD if f["block_min"] > 360 else COMP_SHORT_HAUL_USD
+        total += rate * f.get("pax_count", 0)
+    return total
+
+
+def _charge_cancellation_care(state: dict, flights: list[dict]) -> int:
+    """Art. 9 care for passengers whose flight was cancelled outright. Owed
+    regardless of cause, so — unlike compensation — weather buys no relief."""
+    total = 0
+    for f in flights:
+        if f.get("care_charged"):
+            continue
+        pax = f.get("pax_count", 0)
+        if not pax:
+            continue
+        f["care_charged"] = True
+        total += pax * (CARE_MEAL_USD_PER_PAX + CARE_HOTEL_USD_PER_PAX)
+    if total:
+        state["kpis"]["duty_of_care_usd"] = state["kpis"].get("duty_of_care_usd", 0) + total
+        state["kpis"]["cost_usd"] += total
+    return total
+
+
+def _charge_cancellation_compensation(state: dict, flights: list[dict]) -> int:
+    """Charge Art. 7 compensation on cancelled sectors.
+
+    Without this, cancelling is a free way to escape compensation a flight had
+    already earned by running late — the player is rewarded for making the
+    passenger outcome worse. `tick()` skips cancelled flights before
+    `_maybe_charge_compensation` can fire, so the charge has to happen at the
+    moment of cancellation instead."""
+    total = 0
+    for f in flights:
+        if f.get("comp_charged") or f.get("comp_exempt"):
+            continue
+        rate = COMP_LONG_HAUL_USD if f["block_min"] > 360 else COMP_SHORT_HAUL_USD
+        amount = rate * f.get("pax_count", 0)
+        if not amount:
+            continue
+        f["comp_charged"] = True
+        total += amount
+        note = f.get("note") or ""
+        tag = "UK261 COMP DUE (CANCELLED)"
+        f["note"] = f"{note} · {tag}" if note else tag
+    if total:
+        state["kpis"]["compensation_usd"] = state["kpis"].get("compensation_usd", 0) + total
+        state["kpis"]["cost_usd"] += total
+    return total
+
+
+def _care_threshold_min(flight: dict) -> int:
+    """Art. 9 care kicks in at a delay threshold banded by sector length."""
+    block = flight["block_min"]
+    if block <= 120:
+        return CARE_DELAY_THRESHOLD_SHORT_MIN
+    if block <= 360:
+        return CARE_DELAY_THRESHOLD_MED_MIN
+    return CARE_DELAY_THRESHOLD_LONG_MIN
+
+
+def _maybe_charge_duty_of_care(state: dict, flight: dict) -> dict | None:
+    """Charge Art. 9 care — meals, and a hotel where the delay has run long
+    enough that passengers are staying the night.
+
+    Deliberately NOT gated on `comp_exempt`: care is owed whatever the cause.
+    That is the whole point of modelling it separately from compensation."""
+    if flight.get("care_charged"):
+        return None
+    delay = flight.get("delay_min", 0)
+    if delay < _care_threshold_min(flight):
+        return None
+    pax = flight.get("pax_count", 0)
+    if not pax:
+        return None
+    overnight = delay >= CARE_OVERNIGHT_DELAY_MIN
+    amount = pax * (CARE_MEAL_USD_PER_PAX + (CARE_HOTEL_USD_PER_PAX if overnight else 0))
+    flight["care_charged"] = True
+    state["kpis"]["duty_of_care_usd"] = state["kpis"].get("duty_of_care_usd", 0) + amount
+    state["kpis"]["cost_usd"] += amount
+    note = flight.get("note") or ""
+    tag = "ART.9 CARE — MEALS + HOTAC" if overnight else "ART.9 CARE — MEALS"
+    flight["note"] = f"{note} · {tag}" if note else tag
+    return {
+        "flight_id": flight["id"], "callsign": flight["callsign"],
+        "amount_usd": amount, "pax": pax, "overnight": overnight,
+    }
+
+
+def is_clock_paused(state: dict) -> bool:
+    """True while any open incident requires an aircraft decision — a
+    grounded tail (major TECH) that can only be resolved by the player
+    reassigning a real tail via Aircraft Control or cancelling the rotation.
+    Nothing else about the operation is allowed to move while this is true."""
+    return any(
+        i["status"] == "open" and i.get("requires_aircraft_decision")
+        for i in state.get("incidents", [])
+    )
+
+
 def tick(state: dict, minutes: int = 30) -> dict:
     """Advance the simulation clock by `minutes`. May spawn incidents."""
     if state["phase"] != "OPS":
         return {"ok": False, "reason": "Not in OPS phase"}
+    if is_clock_paused(state):
+        blocking = [
+            i["id"] for i in state["incidents"]
+            if i["status"] == "open" and i.get("requires_aircraft_decision")
+        ]
+        return {
+            "ok": True, "paused": True, "blocking_incidents": blocking,
+            "new_incidents": [], "reactionary_delays": [], "curfew_violations": [],
+            "escalations": [], "compensation_events": [],
+        }
     state["tick_count"] += 1
     clock = datetime.fromisoformat(state["clock"]) + timedelta(minutes=minutes)
     state["clock"] = clock.isoformat()
@@ -1602,6 +2930,7 @@ def tick(state: dict, minutes: int = 30) -> dict:
     # ---- Flight lifecycle progression ----
     curfew_violations = []
     comp_events = []
+    care_events = []
     for f in state["flights"]:
         if f["status"] in ("cancelled", "diverted", "landed"):
             continue
@@ -1630,10 +2959,21 @@ def tick(state: dict, minutes: int = 30) -> dict:
                 comp = _maybe_charge_compensation(state, f)
                 if comp:
                     comp_events.append(comp)
+                care = _maybe_charge_duty_of_care(state, f)
+                if care:
+                    care_events.append(care)
                 for cid in f["assigned_crew_ids"]:
                     c = next((cc for cc in state["crew"] if cc["id"] == cid), None)
                     if c:
                         c["fdp_used_min"] = c.get("fdp_used_min", 0) + f["block_min"]
+                        # The duty period this crew has now completed — what
+                        # tomorrow's minimum rest is measured against.
+                        duty_clock = crew_duty_clock(state, cid)
+                        c["last_duty_min"] = max(
+                            c.get("last_duty_min", 0),
+                            duty_clock["fdp_projected_min"] if duty_clock and duty_clock["on_duty"]
+                            else c["fdp_used_min"],
+                        )
                         c["duty_7d_hr"] = round(
                             c.get("duty_7d_hr", 0) + f["block_min"] / 60, 2
                         )
@@ -1698,6 +3038,8 @@ def tick(state: dict, minutes: int = 30) -> dict:
             "delay_code": meta.get("delay_code"),
             "escalated": False,
         }
+        if kind == "TECH" and sev == "major":
+            inc["requires_aircraft_decision"] = True
         # Weather/ATC are "extraordinary circumstances" under EU261/UK261 —
         # a flight disrupted by them owes no passenger compensation however
         # late it eventually arrives.
@@ -1749,6 +3091,8 @@ def tick(state: dict, minutes: int = 30) -> dict:
             continue  # overtaken by events — nothing left to escalate into
         inc["escalated"] = True
         inc["severity"] = "major"
+        if inc["type"] == "TECH":
+            inc["requires_aircraft_decision"] = True
         fl["delay_min"] += ESCALATION_EXTRA_DELAY_MIN
         if fl["status"] == "scheduled":
             fl["status"] = "delayed"
@@ -1765,15 +3109,58 @@ def tick(state: dict, minutes: int = 30) -> dict:
             "added_min": ESCALATION_EXTRA_DELAY_MIN,
         })
 
-    reactionary = propagate_reactionary_delays(state)
+    reactionary = _log_cascade(state, propagate_reactionary_delays(state), "tick")
+
+    # ---- Crew timing out (the operation breaking its own duties) ----
+    # Run AFTER propagation so the delays are settled, and only for pairings
+    # still open. One incident per pairing per day: a duty can only bust once.
+    crew_timeouts = []
+    seen_pairings = {inc.get("pairing_id") for inc in state["incidents"] if inc["type"] == "CREW_HOURS"}
+    for f in state["flights"]:
+        if f["status"] not in ("scheduled", "delayed", "boarding"):
+            continue
+        pid = f.get("pairing_id")
+        if pid in seen_pairings:
+            continue
+        hours_warnings = check_crew_hours(state, f)
+        if not hours_warnings:
+            continue
+        seen_pairings.add(pid)
+        meta = INCIDENT_META["CREW_HOURS"]
+        inc = {
+            "id": _hash_id("INC"),
+            "type": "CREW_HOURS",
+            "severity": "major",
+            "description": hours_warnings[0]["message"],
+            "raised_at": state["clock"],
+            "flight_id": f["id"],
+            "flight_callsign": f["callsign"],
+            "pairing_id": pid,
+            "status": "open",
+            "resolution": None,
+            "options": _recovery_options_for(state, f, "CREW_HOURS", "major"),
+            "reported_by": meta["desk"],
+            "delay_code": meta["delay_code"],
+            "escalated": False,
+            "crew_warnings": hours_warnings,
+        }
+        state["incidents"].append(inc)
+        new_incidents.append(inc)
+        crew_timeouts.append({
+            "incident_id": inc["id"], "flight_callsign": f["callsign"],
+            "crew_ids": [w["crew_id"] for w in hours_warnings],
+        })
+
     _recompute_kpis(state)
     return {
         "ok": True,
         "new_incidents": new_incidents,
         "reactionary_delays": reactionary,
+        "crew_timeouts": crew_timeouts,
         "curfew_violations": curfew_violations,
         "escalations": escalations,
         "compensation_events": comp_events,
+        "duty_of_care_events": care_events,
         "clock": state["clock"],
     }
 
@@ -1789,44 +3176,38 @@ def _missing_ranks(state: dict, flight: dict) -> list[str]:
     return [r for r in ("CP", "FO", "SC", "CC") if counts[r] < req[r]]
 
 
-def _legal_candidates(state: dict, flight: dict, rank: str, statuses: tuple[str, ...]) -> list[dict]:
+def _legal_candidates(state: dict, flight: dict, rank: str, statuses: tuple[str, ...],
+                      ignore_position: bool = False) -> list[dict]:
     """Crew of `rank` in one of `statuses`, type-rated for the flight, passing a
-    full legality check. Sorted by fatigue (freshest first)."""
+    full legality check. Sorted by fatigue (freshest first).
+
+    `ignore_position` drops CREW_WRONG_STATION from the filter — used when the
+    caller intends to POSITION the crew there, which is the one legitimate
+    answer to being in the wrong place."""
     type_q = flight["required_crew"]["type_qual"]
+    ignorable = {"CREW_WRONG_STATION"} if ignore_position else set()
     out = []
     for c in state["crew"]:
         if c["rank"] != rank or c["status"] not in statuses:
             continue
         if type_q not in c["qualifications"]:
             continue
-        if any(w["severity"] == "critical" for w in check_assignment(state, flight["id"], c["id"])):
+        blocking = [w for w in check_assignment(state, flight["id"], c["id"])
+                    if w["severity"] == "critical" and w["code"] not in ignorable]
+        if blocking:
             continue
         out.append(c)
     out.sort(key=lambda c: c["fatigue_score"])
     return out
 
 
-def _find_recovery_crew(state: dict, flight: dict, statuses: tuple[str, ...]):
+def _find_recovery_crew(state: dict, flight: dict, statuses: tuple[str, ...],
+                        ignore_position: bool = False):
     """First legal crew member covering the flight's worst rank gap, or None."""
     for rank in _missing_ranks(state, flight):
-        cands = _legal_candidates(state, flight, rank, statuses)
+        cands = _legal_candidates(state, flight, rank, statuses, ignore_position)
         if cands:
             return cands[0]
-    return None
-
-
-def _find_spare_aircraft(state: dict, flight: dict):
-    """A same-type tail with no remaining active sector today, or None."""
-    active = ("scheduled", "delayed", "boarding", "airborne")
-    for ac in state.get("fleet", FLEET):
-        if ac["type"] != flight["aircraft_type"] or ac["reg"] == flight["aircraft_reg"]:
-            continue
-        busy = any(
-            f["aircraft_reg"] == ac["reg"] and f["status"] in active
-            for f in state["flights"]
-        )
-        if not busy:
-            return ac
     return None
 
 
@@ -1840,6 +3221,163 @@ def _cancellable_pairing_sectors(state: dict, flight: dict) -> list[dict]:
                 and f["status"] in ("scheduled", "delayed", "boarding")):
             sectors.append(f)
     return sectors
+
+
+def _simulate_pairing_impact(state: dict, pairing_id: str, new_reg: str | None, cancel: bool = False) -> int:
+    """Read-only what-if: on a SCRATCH copy of the day's flights, either
+    re-tail `pairing_id`'s remaining active sectors onto `new_reg` or cancel
+    them, then measure the total network reactionary-delay minutes that
+    results. Cancellation is converted into the same delay-minute currency
+    via the CANCEL_DELAY_EQUIVALENT_MIN_PER_PAX convention (matching how a
+    cancellation's passenger-disruption cost is already booked elsewhere),
+    so every candidate — swap onto tail X, or cancel — is directly
+    comparable on one scale.
+
+    If `new_reg` isn't currently at the pairing's departure station, this
+    automatically inserts a scratch positioning (ferry) sector first — the
+    same repositioning-cost math ferry_spare_aircraft applies for real — so a
+    tail that needs ferrying and one that's already in place are graded on
+    equal footing. Never mutates the real state."""
+    sectors = _pairing_sectors(state, pairing_id)
+    flight_ids = {s["id"] for s in sectors}
+    scratch = {"flights": copy.deepcopy(state["flights"])}
+    reset_reactionary_delays(scratch)
+
+    if cancel:
+        cancel_pax = 0
+        for f in scratch["flights"]:
+            if f["id"] in flight_ids and f["status"] != "cancelled":
+                cancel_pax += f.get("pax_count", 0)
+                f["status"] = "cancelled"
+        propagate_reactionary_delays(scratch)
+        total = sum(f.get("reactionary_min", 0) for f in scratch["flights"])
+        return total + CANCEL_DELAY_EQUIVALENT_MIN_PER_PAX * cancel_pax
+
+    if new_reg:
+        plan = _ferry_plan(state, pairing_id, new_reg)
+        if plan is not None:
+            scratch["flights"].append({
+                "id": "SCRATCH-FERRY", "callsign": "FERRY", "aircraft_reg": new_reg,
+                "std": plan["std"], "sta": plan["sta"], "block_min": plan["block_min"],
+                "status": "scheduled", "delay_min": 0, "reactionary_min": 0, "pax_count": 0,
+            })
+
+    for f in scratch["flights"]:
+        if f["id"] in flight_ids and f["status"] in _AC_ACTIVE_STATUSES:
+            f["aircraft_reg"] = new_reg
+    propagate_reactionary_delays(scratch)
+    return sum(f.get("reactionary_min", 0) for f in scratch["flights"])
+
+
+def _best_aircraft_decision(state: dict, pairing_id: str) -> dict:
+    """Search every tail that could take this pairing right now — either
+    directly or via a positioning ferry — plus cancellation, and return
+    whichever minimizes total network reactionary delay: the benchmark the
+    player's own aircraft decision is graded against. `choice` is a tail
+    reg, or the literal string 'cancel'. Uses check_ferry (not
+    check_aircraft_assignment) as the candidate filter since ferrying makes
+    position a non-issue — a same-type, genuinely free tail is always a
+    valid candidate, just possibly an expensive one once its positioning
+    time is counted."""
+    sectors = _pairing_sectors(state, pairing_id)
+    ac_type = sectors[0]["aircraft_type"] if sectors else None
+    current_reg = sectors[0]["aircraft_reg"] if sectors else None
+    candidates = []
+    for ac in state.get("fleet", FLEET):
+        if ac["type"] != ac_type or ac["reg"] == current_reg:
+            continue
+        if any(w["severity"] == "critical" for w in check_ferry(state, pairing_id, ac["reg"])):
+            continue
+        candidates.append({
+            "choice": ac["reg"],
+            "impact_min": _simulate_pairing_impact(state, pairing_id, ac["reg"]),
+        })
+    candidates.append({
+        "choice": "cancel",
+        "impact_min": _simulate_pairing_impact(state, pairing_id, None, cancel=True),
+    })
+    candidates.sort(key=lambda c: c["impact_min"])
+    return candidates[0]
+
+
+def _grade_aircraft_decision(state: dict, pairing_id: str, chosen: str) -> dict:
+    """Grade the player's aircraft decision (`chosen`: a tail reg, or the
+    literal 'cancel') against the best feasible alternative available at the
+    moment of the decision. Must be called BEFORE the chosen action mutates
+    `state` — it reads live state to find candidates but only ever simulates
+    on scratch copies."""
+    best = _best_aircraft_decision(state, pairing_id)
+    player_impact = _simulate_pairing_impact(
+        state, pairing_id, None if chosen == "cancel" else chosen, cancel=(chosen == "cancel")
+    )
+    delta = player_impact - best["impact_min"]
+    if delta <= 0:
+        verdict = "OPTIMAL"
+    elif delta <= DECISION_GOOD_THRESHOLD_MIN:
+        verdict = "GOOD"
+    else:
+        verdict = "SUBOPTIMAL"
+    return {
+        "player_choice": chosen,
+        "player_impact_min": player_impact,
+        "best_choice": best["choice"],
+        "best_impact_min": best["impact_min"],
+        "delta_min": delta,
+        "verdict": verdict,
+    }
+
+
+def _standby_label(standby: dict | None) -> str:
+    if not standby:
+        return "Call Out Standby Crew"
+    kind = "Airport" if standby.get("standby_type") == STANDBY_AIRPORT else "Home"
+    return f"Call Out {kind} Standby (+{standby_response_min(standby)}min)"
+
+
+def _standby_detail(standby: dict | None) -> str | None:
+    if not standby:
+        return None
+    kind = "airport standby" if standby.get("standby_type") == STANDBY_AIRPORT else "home standby"
+    return (
+        f"{standby['id']} {standby['name']} ({standby['rank']}) — {kind}, "
+        f"{standby_response_min(standby)}min to report"
+    )
+
+
+def _positioning_option(state: dict, flight: dict) -> dict:
+    """The positioning lever, priced and feasibility-checked against a real
+    inbound sector rather than offered unconditionally."""
+    pv = preview_deadhead(state, flight["id"])
+    blocking = next((w for w in pv["warnings"] if w["severity"] == "critical"), None)
+    crew = pv.get("crew")
+    if blocking:
+        return {
+            "action": "deadhead", "label": "Position Crew (Deadhead)",
+            "cost_usd": 0, "otp_hit": 0, "fatigue": 0, "pax_disrupt": False,
+            "feasible": False, "reason": blocking["message"], "detail": None,
+        }
+    plan = pv.get("plan")
+    if not pv["needs_positioning"] or not plan:
+        return {
+            "action": "deadhead", "label": "Position Crew (Deadhead)",
+            "cost_usd": 0, "otp_hit": 0, "fatigue": 0, "pax_disrupt": False,
+            "feasible": False,
+            "reason": (
+                f"{crew['id']} is already at {flight['origin']} — reassign them directly, "
+                f"there is nothing to position." if crew else "Nobody available to position."
+            ),
+            "detail": None,
+        }
+    return {
+        "action": "deadhead",
+        "label": f"Position Crew via {plan['carrier_callsign']}",
+        "cost_usd": pv["cost_usd"], "otp_hit": 6, "fatigue": 8, "pax_disrupt": False,
+        "feasible": True, "reason": None,
+        "detail": (
+            f"{crew['id']} {crew['name']} ({crew['rank']}) rides {plan['carrier_callsign']} "
+            f"{plan['from']}→{plan['to']}, in at {plan['arrives'][11:16]}Z"
+        ),
+    }
 
 
 def _recovery_options_for(state: dict, flight: dict, kind: str, sev: str) -> list[dict]:
@@ -1879,28 +3417,58 @@ def _recovery_options_for(state: dict, flight: dict, kind: str, sev: str) -> lis
         standby = _find_recovery_crew(state, flight, ("standby",))
         swap = _find_recovery_crew(state, flight, ("available",))
         return [
-            opt("callout_standby", "Call Out Standby Crew",
+            opt("callout_standby", _standby_label(standby),
                 2500 + (2500 if block > 360 else 0), otp_hit=2, fatigue=5,
                 feasible=standby is not None,
                 reason=None if standby else f"No legal standby {gap_str} rated {type_q}",
-                detail=f"{standby['id']} {standby['name']} ({standby['rank']})" if standby else None),
+                detail=_standby_detail(standby)),
             opt("swap_crew", "Reassign Available Crew", 1200, otp_hit=4, fatigue=3,
                 feasible=swap is not None,
                 reason=None if swap else f"No legal available {gap_str} rated {type_q}",
                 detail=f"{swap['id']} {swap['name']} ({swap['rank']})" if swap else None),
-            opt("deadhead", "Position Crew (Deadhead)", 4000 + block * 3, otp_hit=12, fatigue=8),
+            _positioning_option(state, flight),
             *base,
         ]
-    if kind == "TECH":
-        spare = _find_spare_aircraft(state, flight)
+    if kind == "CREW_HOURS":
+        type_q = flight["required_crew"]["type_qual"]
+        standby = _find_recovery_crew(state, flight, ("standby",))
+        swap = _find_recovery_crew(state, flight, ("available",))
         return [
-            opt("aircraft_swap", "Swap Aircraft From Spare", 8000 + pax * 15, otp_hit=18, fatigue=1,
-                feasible=spare is not None,
-                reason=None if spare else f"No spare {flight['aircraft_type']} on the ground",
-                detail=spare["reg"] if spare else None),
-            opt("mel_defer", "Accept MEL Deferral", 800, otp_hit=4,
-                feasible=sev == "minor",
-                reason=None if sev == "minor" else "Defect outside MEL limits — cannot defer"),
+            opt("swap_crew", "Replace With Fresh Crew", 1800, otp_hit=6, fatigue=3,
+                feasible=swap is not None,
+                reason=None if swap else f"No legal available crew rated {type_q} with the hours left",
+                detail=f"{swap['id']} {swap['name']} ({swap['rank']})" if swap else None),
+            opt("callout_standby", _standby_label(standby),
+                3000 + (2500 if block > 360 else 0), otp_hit=4, fatigue=5,
+                feasible=standby is not None,
+                reason=None if standby else f"No legal standby crew rated {type_q} with the hours left",
+                detail=_standby_detail(standby)),
+            # No "hold" option: accepting more delay is what timed the duty out.
+            opt("cancel",
+                "Cancel Flight" if len(cancel_sectors) == 1 else f"Cancel Pairing ({len(cancel_sectors)} sectors)",
+                15000 * len(cancel_sectors) + cancel_pax * 280,
+                pax_disrupt=True,
+                detail=f"{cancel_pax} pax disrupted, crew stand down out of hours"),
+        ]
+    if kind == "TECH":
+        if sev == "major":
+            # Grounded — not MEL-deferrable, can't be held for. The only
+            # options resolvable from this card are below; getting the tail
+            # flying again means going to Aircraft Control (see
+            # requires_aircraft_decision / is_clock_paused), which the whole
+            # sim is frozen for until the player acts.
+            cancel_label = (
+                "Cancel Flight" if len(cancel_sectors) == 1
+                else f"Cancel Pairing ({len(cancel_sectors)} sectors)"
+            )
+            return [
+                opt("cancel", cancel_label,
+                    15000 * len(cancel_sectors) + cancel_pax * 280,
+                    pax_disrupt=True,
+                    detail=f"{cancel_pax} pax disrupted, crew released"),
+            ]
+        return [
+            opt("mel_defer", "Accept MEL Deferral", 800, otp_hit=4),
             *base,
         ]
     if kind == "WEATHER":
@@ -1938,7 +3506,6 @@ def resolve_incident(state: dict, incident_id: str, action: str) -> dict:
     # options were generated, so feasibility is re-checked live. On failure the
     # incident stays open and nothing is paid.
     replacement = None
-    spare = None
     if flight:
         if action == "callout_standby":
             replacement = _find_recovery_crew(state, flight, ("standby",))
@@ -1952,14 +3519,18 @@ def resolve_incident(state: dict, incident_id: str, action: str) -> dict:
                 return {"ok": False, "incident": inc,
                         "reason": chosen.get("reason") or
                         f"No legal available crew rated {flight['required_crew']['type_qual']}."}
-        elif action == "aircraft_swap":
-            spare = _find_spare_aircraft(state, flight)
-            if not spare:
-                return {"ok": False, "incident": inc,
-                        "reason": f"No spare {flight['aircraft_type']} on the ground."}
         elif chosen.get("feasible") is False:
             return {"ok": False, "incident": inc,
                     "reason": chosen.get("reason") or "Option not feasible."}
+
+    # A grounded-aircraft incident resolved by cancelling (rather than by a
+    # reassignment via Aircraft Control — see assign_aircraft) is graded here,
+    # before the cancellation mutates the schedule out from under the
+    # what-if search.
+    if flight and action == "cancel" and inc.get("requires_aircraft_decision"):
+        pairing_id = flight.get("pairing_id")
+        if pairing_id:
+            inc["decision_grade"] = _grade_aircraft_decision(state, pairing_id, "cancel")
 
     # ---- Apply (success guaranteed from here)
     cost = chosen.get("cost_usd", 0)
@@ -1982,6 +3553,8 @@ def resolve_incident(state: dict, incident_id: str, action: str) -> dict:
                 for cid in list(cf["assigned_crew_ids"]):
                     cf["assigned_crew_ids"].remove(cid)
                     released.add(cid)
+            cost += _charge_cancellation_compensation(state, to_cancel)
+            cost += _charge_cancellation_care(state, to_cancel)
             for cid in released:
                 c = next((cc for cc in state["crew"] if cc["id"] == cid), None)
                 if c and not any(cid in f["assigned_crew_ids"] for f in state["flights"]):
@@ -1994,6 +3567,26 @@ def resolve_incident(state: dict, incident_id: str, action: str) -> dict:
                     f"{len(released)} crew released to the pool."
                 )
         elif action in ("callout_standby", "swap_crew"):
+            if inc["type"] == "CREW_HOURS":
+                # Out of hours is not "available" — release them from every
+                # remaining sector of the pairing and put them into rest, or
+                # the replacement just joins a crew that still cannot fly.
+                pairing_id = flight.get("pairing_id")
+                timed_out = [w["crew_id"] for w in inc.get("crew_warnings", [])]
+                for pf in state["flights"]:
+                    if pf["id"] != flight["id"] and not (pairing_id and pf.get("pairing_id") == pairing_id):
+                        continue
+                    if pf["status"] in ("landed", "cancelled"):
+                        continue
+                    for cid in timed_out:
+                        if cid in pf["assigned_crew_ids"]:
+                            pf["assigned_crew_ids"].remove(cid)
+                for cid in timed_out:
+                    c = next((cc for cc in state["crew"] if cc["id"] == cid), None)
+                    if c:
+                        c["status"] = "rest"
+                        c["assigned_flight_id"] = None
+                inc["stood_down_crew_ids"] = timed_out
             # assign_crew handles the whole pairing + legality bookkeeping
             assign_crew(state, flight["id"], replacement["id"])
             replacement["status"] = "on_duty"
@@ -2001,15 +3594,12 @@ def resolve_incident(state: dict, incident_id: str, action: str) -> dict:
             inc["replacement_crew_name"] = replacement["name"]
             if action == "swap_crew":
                 flight["delay_min"] += 20
-        elif action == "aircraft_swap":
-            # the spare tail takes over every remaining sector of the pairing
-            pairing_id = flight.get("pairing_id")
-            for pf in state["flights"]:
-                same_pairing = pf["id"] == flight["id"] or (pairing_id and pf.get("pairing_id") == pairing_id)
-                if same_pairing and pf["status"] in ("scheduled", "delayed", "boarding"):
-                    pf["aircraft_reg"] = spare["reg"]
-            inc["resolution_note"] = f"Aircraft swapped to {spare['reg']}."
-            flight["delay_min"] += 45
+            elif action == "callout_standby":
+                # Getting them from the crew room or from home is not free.
+                notice = standby_response_min(replacement)
+                flight["delay_min"] += notice
+                flight["status"] = "delayed"
+                inc["callout_notice_min"] = notice
         elif action == "reroute":
             flight["status"] = "diverted"
             flight["delay_min"] += 180
@@ -2018,13 +3608,52 @@ def resolve_incident(state: dict, incident_id: str, action: str) -> dict:
             flight["delay_min"] += 30
             flight["status"] = "delayed"
         elif action == "mel_defer":
-            flight["note"] = "MEL deferral accepted"
+            ac = next((a for a in state.get("fleet", FLEET) if a["reg"] == flight["aircraft_reg"]), None)
+            if ac is not None:
+                cats, weights = zip(*MEL_CATEGORY_WEIGHTS.items())
+                cat = random.choices(cats, weights=weights)[0]
+                item = {
+                    "id": _hash_id("MEL"),
+                    "category": cat,
+                    "note": inc["description"],
+                    "days_remaining": MEL_CATEGORY_LIMITS_DAYS[cat],
+                    "expired": False,
+                }
+                ac.setdefault("mel_items", []).append(item)
+                flight["note"] = f"MEL deferral accepted (Cat {cat}, {item['days_remaining']}d limit)"
+            else:
+                flight["note"] = "MEL deferral accepted"
         elif action == "request_slot":
             flight["delay_min"] = max(0, flight["delay_min"] - 15)
         elif action == "warn_crew":
             pass
         elif action == "deadhead":
-            flight["delay_min"] += 45
+            pv = preview_deadhead(state, flight["id"])
+            plan, dh_crew = pv.get("plan"), pv.get("crew")
+            if plan and dh_crew:
+                crew_obj = next(c for c in state["crew"] if c["id"] == dh_crew["id"])
+                crew_obj.setdefault("positioning", []).append(plan)
+                # ORO.FTL.215: positioning counts as duty and as FDP, but it is
+                # NOT a sector — it does not push the crew down the FDP table.
+                crew_obj["fdp_used_min"] = crew_obj.get("fdp_used_min", 0) + plan["block_min"]
+                crew_obj["duty_7d_hr"] = round(
+                    crew_obj.get("duty_7d_hr", 0) + plan["block_min"] / 60, 2)
+                # They arrive when they arrive; the duty cannot start before.
+                arrives = datetime.fromisoformat(plan["arrives"])
+                report_by = arrives + timedelta(minutes=DEADHEAD_REPORT_BUFFER_MIN)
+                std = datetime.fromisoformat(flight["std"]) + timedelta(
+                    minutes=flight.get("delay_min", 0))
+                if report_by > std:
+                    flight["delay_min"] += int((report_by - std).total_seconds() // 60)
+                    flight["status"] = "delayed"
+                assign_crew(state, flight["id"], crew_obj["id"], force=True)
+                crew_obj["status"] = "on_duty"
+                inc["positioned_crew_id"] = crew_obj["id"]
+                inc["positioning_plan"] = plan
+            else:
+                # Nothing connects — the option should not have been offered,
+                # but never silently succeed if it was.
+                flight["delay_min"] += 45
 
         if pax_disrupt and action != "cancel":
             state["kpis"]["pax_disrupted"] += int(flight.get("pax_count", 0) * 0.4)
@@ -2034,11 +3663,20 @@ def resolve_incident(state: dict, incident_id: str, action: str) -> dict:
     inc["resolution"] = action
     inc["resolution_label"] = chosen["label"]
     inc["resolved_at"] = state["clock"]
+    reactionary_before = _network_reactionary_total(state)
     state["decisions_log"].append({
         "ts": state["clock"], "incident_id": incident_id, "action": action,
-        "cost_usd": cost, "otp_hit": otp_hit
+        "cost_usd": cost, "otp_hit": otp_hit,
+        "flight_callsign": inc.get("flight_callsign"),
+        "incident_type": inc.get("type"),
+        "verdict": (inc.get("decision_grade") or {}).get("verdict"),
     })
-    reactionary = propagate_reactionary_delays(state)
+    reactionary = _log_cascade(state, propagate_reactionary_delays(state),
+                               f"incident_{action}", incident_id)
+    # Knock-on minutes this specific decision put into the network — the
+    # number that makes the debrief able to rank decisions by damage.
+    state["decisions_log"][-1]["reactionary_caused_min"] = max(
+        0, _network_reactionary_total(state) - reactionary_before)
     _recompute_kpis(state)
     return {
         "ok": True,
@@ -2070,6 +3708,203 @@ def reset_reactionary_delays(state: dict) -> None:
             f["note"] = ""
         if f["status"] == "delayed" and f["delay_min"] <= 0:
             f["status"] = "scheduled"
+
+
+def crew_irregularities(state: dict) -> list[dict]:
+    """Everything currently wrong with the crewing picture, derived from the
+    RULES rather than from random events.
+
+    Every exception the player sees today is an incident card — something that
+    happened to them. Real crew tracking leads with a live irregularities list
+    (AIMS "Live Display of all Irregularities that need to be actioned",
+    NetLine/Crew's Problem Monitor, Jeppesen's Alert Monitor): open sectors,
+    duties about to bust, crew out of position. Those are conditions, not
+    events, and nothing surfaced them.
+
+    Returns the house `{code, severity, message, rule_ref}` shape, worst first.
+    """
+    out: list[dict] = []
+
+    # Open sectors — uncovered flying. The real desk's first question.
+    completeness = roster_completeness(state)
+    for m in completeness["missing"]:
+        gaps = ", ".join(f"{n}x {r}" for r, n in m["need"].items() if n)
+        if not gaps:
+            continue
+        out.append({
+            "code": "OPEN_SECTOR", "severity": "critical",
+            "message": f"{m['callsign']} is uncovered — short {gaps}.",
+            "rule_ref": "Operational — crew complement",
+            "flight_id": m["flight_id"],
+        })
+
+    # Duties that will not make it at the delays standing right now.
+    seen_pairings: set = set()
+    for f in state["flights"]:
+        if f["status"] not in ("scheduled", "delayed", "boarding"):
+            continue
+        pid = f.get("pairing_id")
+        if pid in seen_pairings:
+            continue
+        for w in check_crew_hours(state, f):
+            seen_pairings.add(pid)
+            out.append({**w, "code": "FDP_TIMEOUT_PENDING", "flight_id": f["id"]})
+
+    # Crew rostered somewhere they physically are not.
+    for f in state["flights"]:
+        if f["status"] not in ("scheduled", "delayed", "boarding"):
+            continue
+        dep = datetime.fromisoformat(f["std"]) + timedelta(minutes=f.get("delay_min", 0))
+        for cid in f.get("assigned_crew_ids", []):
+            if _crew_position_before(state, cid, dep) != f["origin"]:
+                crew = next((c for c in state["crew"] if c["id"] == cid), None)
+                out.append({
+                    "code": "CREW_OUT_OF_POSITION", "severity": "critical",
+                    "crew_id": cid,
+                    "message": (
+                        f"{cid} {crew['name'] if crew else ''} is rostered on {f['callsign']} "
+                        f"out of {f['origin']} but will not be there — position them or replace them."
+                    ),
+                    "rule_ref": "Operational — crew positioning",
+                    "flight_id": f["id"],
+                })
+
+    # Crew at the consecutive-duty limit.
+    for c in state["crew"]:
+        if c.get("days_since_off", 0) >= MAX_CONSECUTIVE_DUTY_DAYS:
+            out.append({
+                "code": "DAYS_OFF_DUE", "severity": "warning",
+                "message": (
+                    f"{c['id']} {c['name']} has worked {c['days_since_off']} consecutive "
+                    f"duty days — a day off is due."
+                ),
+                "rule_ref": "ORO.FTL.235 / industrial agreement",
+            })
+
+    # The reserve bank itself. Running it to zero is how a small problem
+    # becomes an unrecoverable one.
+    for rank in ("CP", "FO"):
+        pool = [c for c in state["crew"] if c["rank"] == rank and c["status"] == "standby"]
+        if len(pool) <= 1:
+            out.append({
+                "code": "STANDBY_POOL_LOW", "severity": "warning",
+                "message": (
+                    f"{len(pool)} {rank} left on standby. The next sickness or timeout has "
+                    f"nowhere to go."
+                ),
+                "rule_ref": "Operational — reserve cover",
+            })
+
+    order = {"critical": 0, "warning": 1}
+    out.sort(key=lambda w: order.get(w["severity"], 2))
+    return out
+
+
+def crew_duty_clock(state: dict, crew_id: str) -> dict | None:
+    """Live duty picture for one crew member: how much FDP their current
+    pairing will consume at the delays standing right now, what their cap is,
+    how much slack is left, and the latest the pairing can go off-blocks
+    before they bust it.
+
+    This is the number a real crew controller watches all shift — "when do
+    they go illegal" — and it moves every time the operation slips."""
+    crew = next((c for c in state["crew"] if c["id"] == crew_id), None)
+    if not crew:
+        return None
+    assigned = [f for f in state["flights"]
+                if crew_id in f.get("assigned_crew_ids", []) and f["status"] != "cancelled"]
+    # A duty that has fully landed is finished, not running.
+    if not any(f["status"] != "landed" for f in assigned):
+        assigned = []
+    if not assigned:
+        return {
+            "crew_id": crew_id, "on_duty": False, "fdp_used_min": crew.get("fdp_used_min", 0),
+            "fdp_projected_min": crew.get("fdp_used_min", 0), "fdp_cap_min": None,
+            "slack_min": None, "latest_off_blocks": None, "delay_min": 0,
+        }
+    assigned.sort(key=lambda f: f["std"])
+    lead = assigned[0]
+    total, scheduled, delay, sectors = _pairing_fdp_min(state, lead)
+    cap, basis = _fdp_cap_for_flight(
+        lead, sectors=sectors, acclimatised=_crew_acclimatised(state, crew, lead))
+    # `_pairing_fdp_min` spans the WHOLE pairing, report to final on-blocks —
+    # including sectors already flown. Those sectors have also been added to
+    # fdp_used_min as they landed, so only duty from OTHER pairings may be
+    # carried on top, or the flown legs get counted twice.
+    flown_here = sum(f["block_min"] for f in assigned if f["status"] == "landed")
+    prior_duty = max(0, crew.get("fdp_used_min", 0) - flown_here)
+    projected = prior_duty + total
+    slack = cap - projected
+
+    # Report is 60 min before the first STD; the FDP must end by report + cap,
+    # and it ends at the final on-blocks plus 30 min post-flight.
+    report = datetime.fromisoformat(lead["std"]) - timedelta(minutes=60)
+    latest_off_blocks = report + timedelta(minutes=cap - prior_duty - 30)
+    return {
+        "crew_id": crew_id, "on_duty": True,
+        "fdp_used_min": crew.get("fdp_used_min", 0), "prior_duty_min": prior_duty,
+        "fdp_projected_min": projected, "fdp_cap_min": cap, "fdp_basis": basis,
+        "fdp_scheduled_min": scheduled, "delay_min": delay,
+        "slack_min": slack, "legal": slack >= 0,
+        "latest_off_blocks": latest_off_blocks.isoformat(),
+        "pairing_id": lead.get("pairing_id"),
+    }
+
+
+def check_crew_hours(state: dict, flight: dict) -> list[dict]:
+    """Whether the crew already rostered on `flight` can still legally finish
+    the pairing at the delays standing right now. Same `check_*` contract as
+    every other legality gate — a list of `{code, severity, message,
+    rule_ref}` warnings, critical meaning the duty busts.
+
+    Distinct from `check_assignment`, which asks "may I put this crew on this
+    flight?" at rostering time. This asks the question a delay creates:
+    "is the crew I already have still legal?"."""
+    warnings: list[dict] = []
+    if flight["status"] in ("cancelled", "landed"):
+        return warnings
+    for cid in flight.get("assigned_crew_ids", []):
+        clock_info = crew_duty_clock(state, cid)
+        if not clock_info or not clock_info["on_duty"] or clock_info["legal"]:
+            continue
+        crew = next((c for c in state["crew"] if c["id"] == cid), None)
+        over = -clock_info["slack_min"]
+        warnings.append({
+            "code": "FDP_TIMEOUT", "severity": "critical",
+            "message": (
+                f"{cid} {crew['name'] if crew else ''} ({crew['rank'] if crew else '?'}) "
+                f"times out {over}min before this pairing can finish — "
+                f"{clock_info['delay_min']}min of accumulated delay has pushed the duty to "
+                f"{clock_info['fdp_projected_min']//60}h{clock_info['fdp_projected_min']%60:02d}m "
+                f"against a {clock_info['fdp_cap_min']//60}h cap. "
+                f"Off-blocks by {datetime.fromisoformat(clock_info['latest_off_blocks']).strftime('%H:%MZ')} or the duty is illegal."
+            ),
+            "rule_ref": "ORO.FTL.205 / CS FTL.1.205",
+            "crew_id": cid, "over_by_min": over,
+        })
+    return warnings
+
+
+def _log_cascade(state: dict, affected: list[dict], trigger: str,
+                 trigger_id: str | None = None) -> list[dict]:
+    """Persist the causal edges `propagate_reactionary_delays` just produced.
+
+    The engine already knows exactly which inbound made which outbound late;
+    without this the player only ever sees the resulting number and
+    experiences reactionary delay as weather rather than as consequence.
+    `trigger` names what the player did (or what happened to them) so the
+    debrief can attribute the cascade to a decision."""
+    if not affected:
+        return affected
+    log = state.setdefault("cascade_log", [])
+    for edge in affected:
+        log.append({
+            "ts": state.get("clock"),
+            "trigger": trigger,
+            "trigger_id": trigger_id,
+            **edge,
+        })
+    return affected
 
 
 def propagate_reactionary_delays(state: dict) -> list[dict]:
@@ -2135,14 +3970,30 @@ def _recompute_kpis(state: dict) -> None:
     flights = state["flights"]
     if not flights:
         return
-    on_time = sum(1 for f in flights if f.get("delay_min", 0) <= 15 and f["status"] != "cancelled")
-    state["kpis"]["otp_pct"] = round(100.0 * on_time / len(flights), 1)
+    # OTP is measured on OPERATED flights, the way airlines actually report it
+    # — a cancelled sector is not a late sector. Cancelling instead shows up in
+    # the completion factor, so the two levers are priced separately rather
+    # than a cancellation being punished twice through one number.
+    operated = [f for f in flights if f["status"] != "cancelled"]
+    on_time = sum(1 for f in operated if f.get("delay_min", 0) <= 15)
+    state["kpis"]["otp_pct"] = round(100.0 * on_time / len(operated), 1) if operated else 100.0
+    state["kpis"]["completion_factor_pct"] = round(100.0 * len(operated) / len(flights), 1)
+
+    # Reactionary minutes are the currency every recovery lever trades in, so
+    # they have to cost something. The engine already computes them; this is
+    # simply the first time the player is charged for them.
+    reactionary = sum(f.get("reactionary_min", 0) for f in flights)
+    state["kpis"]["reactionary_min"] = reactionary
+    state["kpis"]["delay_cost_usd"] = reactionary * DELAY_COST_PER_MIN_USD
+
     # Score
     s = 1000
     s -= state["kpis"]["legality_breaches"] * 80
     s -= int(state["kpis"]["cost_usd"] / 1000)
+    s -= int(state["kpis"]["delay_cost_usd"] / 1000)
     s -= int(state["kpis"]["pax_disrupted"] / 5)
     s -= max(0, int((75 - state["kpis"]["otp_pct"]) * 5))
+    s -= max(0, int((TARGET_COMPLETION_FACTOR_PCT - state["kpis"]["completion_factor_pct"]) * 8))
     state["kpis"]["score"] = s
 
 
@@ -2161,6 +4012,7 @@ def restart_day(state: dict) -> dict:
     state["clock"] = state["day_start"]
     state["incidents"] = []
     state["decisions_log"] = []
+    state["cascade_log"] = []
     state["tick_count"] = 0
     state["phase"] = "OPS"
     state["kpis"] = {
@@ -2172,6 +4024,12 @@ def restart_day(state: dict) -> dict:
         "cost_usd": 0,
         "pax_delay_min": 0,
         "pax_disrupted": 0,
+        "reactionary_min": 0,
+        "duty_of_care_usd": 0,
+        "discretion_used_count": 0,
+        "discretion_reports": 0,
+        "delay_cost_usd": 0,
+        "completion_factor_pct": 100.0,
         "score": 1000,
     }
     # Reset flight runtime fields, keep crew assignments

@@ -31,8 +31,17 @@ export const api = {
     setDayOff: (gid, crewId, day, off = true) =>
         client.post(`/sim/${gid}/crew/${crewId}/day_off`, { day, off }).then((r) => r.data),
     aircraftControl: (gid) => client.get(`/sim/${gid}/aircraft_control`).then((r) => r.data),
+    irregularities: (gid) => client.get(`/sim/${gid}/irregularities`).then((r) => r.data),
     checkAircraft: (gid, pairingId, reg) =>
         client.post(`/sim/${gid}/check_aircraft/${pairingId}`, { reg }).then((r) => r.data),
     assignAircraft: (gid, pairingId, reg) =>
         client.post(`/sim/${gid}/assign_aircraft/${pairingId}`, { reg }).then((r) => r.data),
+    checkFerry: (gid, pairingId, reg) =>
+        client.post(`/sim/${gid}/check_ferry/${pairingId}`, { reg }).then((r) => r.data),
+    ferryAircraft: (gid, pairingId, reg) =>
+        client.post(`/sim/${gid}/ferry_aircraft/${pairingId}`, { reg }).then((r) => r.data),
+    previewResetToZero: (gid, pairingIds) =>
+        client.post(`/sim/${gid}/preview_reset_to_zero`, { pairing_ids: pairingIds }).then((r) => r.data),
+    resetToZero: (gid, pairingIds) =>
+        client.post(`/sim/${gid}/reset_to_zero`, { pairing_ids: pairingIds }).then((r) => r.data),
 };

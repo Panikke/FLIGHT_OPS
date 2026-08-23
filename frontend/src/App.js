@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useMemo } from "react";
 import "@/App.css";
 import { api } from "./api";
 import BootScreen from "./components/BootScreen";
@@ -14,6 +14,10 @@ import AdvisorPanel from "./components/views/AdvisorPanel";
 import RegsHelp from "./components/views/RegsHelp";
 import Debrief from "./components/views/Debrief";
 import AssignModal from "./components/AssignModal";
+import CascadeStrip from "./components/CascadeStrip";
+import useHotkeys from "./lib/useHotkeys";
+import { NAV } from "./components/Sidebar";
+import ProblemMonitor from "./components/ProblemMonitor";
 
 const STORAGE_KEY = "egw_occ_game_id";
 
@@ -70,10 +74,20 @@ function App() {
         try {
             const res = await api.tick(state.id, minutes);
             await refresh();
-            // A real OCC doesn't freeze the clock for every disruption —
-            // the sim keeps running; toasts + the INCIDENTS nav badge are the
+            // A real OCC doesn't freeze the clock for every disruption — the
+            // sim keeps running; toasts + the INCIDENTS nav badge are the
             // signal, not a forced pause/view-switch. Ignoring an incident has
             // its own cost: it escalates (severity major, extra delay).
+            // The ONE exception is a grounded aircraft (major TECH): that's a
+            // real "the whole op stops until you fix this" decision, so the
+            // clock genuinely freezes (see is_clock_paused server-side) and
+            // we stop autoplay and steer the player to Aircraft Control.
+            if (res.paused) {
+                setPlaying(false);
+                setView("incidents");
+                setToast("⏸ OPERATION PAUSED — grounded aircraft needs a decision. Reassign via AIRCRAFT CONTROL or cancel the rotation.");
+                return;
+            }
             const parts = [];
             if (res.new_incidents?.length) parts.push(`${res.new_incidents.length} new incident(s)`);
             if (res.escalations?.length)
@@ -89,9 +103,13 @@ function App() {
         }
     }
 
+    const pausedForAircraft = !!state?.incidents?.some(
+        (i) => i.status === "open" && i.requires_aircraft_decision
+    );
+
     // Auto-advance loop while playing
     useEffect(() => {
-        if (!playing || state?.phase !== "OPS") return;
+        if (!playing || state?.phase !== "OPS" || pausedForAircraft) return;
         const SPEED_MAP = {
             1: { interval: 1500, minutes: 5 },     // 5 sim min / 1.5s   = 200×
             2: { interval: 1200, minutes: 15 },    // 15 sim min / 1.2s  = 750×
@@ -111,13 +129,37 @@ function App() {
             clearInterval(t);
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [playing, speed, state?.phase, state?.id]);
+    }, [playing, speed, state?.phase, state?.id, pausedForAircraft]);
+
+    // Keyboard accelerators. Real ops desks are driven from the keyboard;
+    // every frequent action here was mouse-only. Inert while typing or while
+    // a modal owns the keyboard (see useHotkeys).
+    const hotkeys = useMemo(
+        () => ({
+            " ": () => {
+                if (state?.phase === "OPS" && !pausedForAircraft) setPlaying((p) => !p);
+            },
+            "[": () => {
+                if (state?.phase === "OPS") tick(15);
+            },
+            "]": () => {
+                if (state?.phase === "OPS") tick(30);
+            },
+            ...Object.fromEntries(NAV.map((n) => [n.key, () => setView(n.id)])),
+        }),
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        [state?.phase, pausedForAircraft]
+    );
+    useHotkeys(hotkeys);
 
     async function resolveIncident(iid, action) {
         const res = await api.resolve(state.id, iid, action);
         await refresh();
         if (res && res.ok === false) {
             setToast(`✕ ${res.reason || "Action not possible — pick another option"}`);
+        } else if (res?.incident?.decision_grade) {
+            const g = res.incident.decision_grade;
+            setToast(`${g.verdict} decision · ${g.player_choice} (+${g.player_impact_min}m) vs best ${g.best_choice} (+${g.best_impact_min}m)`);
         }
     }
 
@@ -240,6 +282,7 @@ function App() {
                 speed={speed}
                 onTogglePlay={() => setPlaying((p) => !p)}
                 onChangeSpeed={(s) => setSpeed(s)}
+                pausedForAircraft={pausedForAircraft}
             />
             <div className="flex-1 flex overflow-hidden">
                 <Sidebar
@@ -250,7 +293,12 @@ function App() {
                     rosterIncomplete={rosterIncomplete}
                     onExitToMenu={exitToMenu}
                 />
-                <div className="flex-1 overflow-hidden">
+                <div className="flex-1 overflow-hidden flex flex-col">
+                    {state.phase === "OPS" && (
+                        <ProblemMonitor state={state} onOpenCrew={() => setView("crew")} />
+                    )}
+                    {state.phase === "OPS" && <CascadeStrip state={state} />}
+                    <div className="flex-1 overflow-hidden">
                     {showView === "roster" && (
                         <RosterBoard
                             state={state}
@@ -266,6 +314,7 @@ function App() {
                             state={state}
                             onResolve={resolveIncident}
                             onAskAdvisor={(iid) => askAdvisor(iid, null)}
+                            onOpenAircraftControl={() => setView("aircraft")}
                         />
                     )}
                     {showView === "crew" && <CrewPanel state={state} />}
@@ -287,6 +336,7 @@ function App() {
                             nextDayBusy={nextDayBusy}
                         />
                     )}
+                    </div>
                 </div>
             </div>
 
