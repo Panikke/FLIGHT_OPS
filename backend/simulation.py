@@ -870,6 +870,9 @@ def advance_to_next_day(state: dict) -> dict:
     # defect that runs out its category's deferral window grounds the tail
     # (see AC_MEL_EXPIRED in check_aircraft_assignment) until cleared.
     for ac in state.get("fleet", []):
+        # The overnight shift finishes any rectification still open. A tail
+        # that broke at 16:00 is not still broken at tomorrow's first wave.
+        ac.pop("aog", None)
         items = ac.get("mel_items")
         if not items:
             continue
@@ -1279,7 +1282,15 @@ def discretion_available(state: dict, flight_id: str, crew_id: str) -> dict:
     total, _sched, _delay, sectors = _pairing_fdp_min(state, flight)
     fdp_max, _basis = _fdp_cap_for_flight(
         flight, sectors=sectors, acclimatised=_crew_acclimatised(state, crew, flight))
+    # CS FTL.1.225: home standby beyond six hours cuts the FDP that follows it.
+    # check_assignment applies this; discretion must measure the overrun
+    # against the same reduced cap or it licenses a duty nobody may fly.
+    fdp_max -= _standby_fdp_reduction_min(crew)
     overrun = (crew.get("fdp_used_min", 0) + total) - fdp_max
+    if overrun <= 0:
+        return {"available": False, "cap_min": cap, "overrun_min": overrun,
+                "augmented": augmented,
+                "reason": "No FDP overrun to extend once the real cap is applied."}
     if overrun > cap:
         return {
             "available": False, "cap_min": cap, "overrun_min": overrun, "augmented": augmented,
@@ -1752,6 +1763,38 @@ CREW_HOTEL_USD = 180             # room, per crew member per night
 CREW_TRANSPORT_USD = 45          # airport-hotel-airport ground transport
 CREW_PERDIEM_USD = 65            # subsistence allowance away from base
 
+# --- Cross-type (sub-fleet) substitution -----------------------------------
+# Putting an off-type tail on a rotation is routine IROPS recovery, not a
+# forbidden act — the binding constraints are physical (range, stand size) and
+# human (type ratings), never the paperwork. UPGAUGE ONLY here: a bigger
+# aircraft covering a smaller rotation. Downgauging would mean offloading
+# passengers into UK261 Art. 4 denied-boarding territory, and in this route
+# network it cannot arise anyway — the A320's 6h max block cannot reach any
+# long-haul destination (shortest is LHR-DXB at 6h50).
+#
+# ICAO Annex 14 aerodrome reference code: C is <36m wingspan (A320), E is
+# <65m (A350, B777). Operating a higher code letter at a lower-code aerodrome
+# needs prior approval — it is not a same-day OCC decision.
+# https://skybrary.aero/articles/icao-aerodrome-reference-code
+AERODROME_CODE = {"A320": "C", "A350": "E", "B777": "E"}
+# Stations that can take a code-E aircraft on a stand at short notice: the hub
+# and the long-haul outstations, plus the largest European fields. Judgement
+# from what each station realistically handles, not a verified stand inventory.
+CODE_E_STATIONS = frozenset({"LHR", "JFK", "DXB", "SIN", "HKG", "LAX",
+                             "CDG", "FRA", "AMS", "MAD", "FCO"})
+# Stand re-plan, re-catering, loading and weight-and-balance redo, cabin crew
+# recall. Judgement figure in the same family as FERRY_DISPATCH_FEE_USD.
+SUBSTITUTION_SETUP_USD = 4000
+
+# --- AOG: aircraft on ground ----------------------------------------------
+# A major technical defect physically stops the aeroplane. It is not a
+# scheduling inconvenience that can be reassigned around by pointing the
+# rotation back at the same tail — the tail is broken. Rectification takes
+# hours, and if it is not finished by the end of the day the overnight shift
+# gets it (the same shape as MEL rectification).
+AOG_REPAIR_MIN_LOW = 240         # a defect line maintenance can clear
+AOG_REPAIR_MIN_HIGH = 600        # one that needs a part flown in
+
 
 def _positioning_leg(state: dict, crew_id: str, to_station: str,
                      arrive_by: datetime | None = None,
@@ -1892,6 +1935,259 @@ def preview_deadhead(state: dict, flight_id: str, crew_id: str | None = None) ->
     }
 
 
+def _ground_aircraft(state: dict, reg: str, reason: str, at_iso: str) -> dict | None:
+    """Put a tail on the ground until maintenance clears it."""
+    ac = next((a for a in state.get("fleet", FLEET) if a["reg"] == reg), None)
+    if ac is None:
+        return None
+    repair_min = random.randint(AOG_REPAIR_MIN_LOW, AOG_REPAIR_MIN_HIGH)
+    ac["aog"] = {
+        "reason": reason,
+        "since": at_iso,
+        "serviceable_at": _add_minutes_to_clock(at_iso, repair_min),
+        "repair_min": repair_min,
+    }
+    return ac["aog"]
+
+
+def _is_aog(ac: dict, clock_iso: str | None = None) -> bool:
+    """Whether this tail is currently unserviceable."""
+    aog = ac.get("aog")
+    if not aog:
+        return False
+    if clock_iso is None:
+        return True
+    return datetime.fromisoformat(clock_iso) < datetime.fromisoformat(aog["serviceable_at"])
+
+
+def _aog_warning(ac: dict, clock_iso: str) -> dict | None:
+    """The house warning for dispatching a broken aeroplane, or None."""
+    if not _is_aog(ac, clock_iso):
+        return None
+    aog = ac["aog"]
+    eta = datetime.fromisoformat(aog["serviceable_at"]).strftime("%H:%MZ")
+    return {
+        "code": "AC_GROUNDED", "severity": "critical",
+        "message": (
+            f"{ac['reg']} is AOG — {aog['reason']} Maintenance estimate {eta}. "
+            f"It cannot operate anything until it is fixed."
+        ),
+        "rule_ref": "Operational — aircraft unserviceable",
+    }
+
+
+def release_serviceable_aircraft(state: dict) -> list[str]:
+    """Clear any AOG whose repair estimate has passed. Returns the tails that
+    came back on line."""
+    released = []
+    for ac in state.get("fleet", FLEET):
+        if ac.get("aog") and not _is_aog(ac, state.get("clock")):
+            ac.pop("aog", None)
+            released.append(ac["reg"])
+    return released
+
+
+def check_substitution(state: dict, pairing_id: str, reg: str) -> list[dict]:
+    """Legality of covering `pairing_id` with an OFF-TYPE tail.
+
+    This is check_aircraft_assignment with the type gate replaced rather than
+    removed: AC_TYPE_MISMATCH becomes a priced option, and the constraints that
+    are genuinely physical take its place. Upgauge only — a smaller aircraft
+    cannot absorb a bigger one's passengers, and in this network it could not
+    reach the destination either."""
+    warnings = [w for w in check_aircraft_assignment(state, pairing_id, reg)
+                if w["code"] != "AC_TYPE_MISMATCH"]
+    sectors = _pairing_sectors(state, pairing_id)
+    ac = next((a for a in state.get("fleet", FLEET) if a["reg"] == reg), None)
+    if not sectors or not ac:
+        return warnings
+
+    active = [s for s in sectors if s["status"] in _AC_ACTIVE_STATUSES]
+    if not active:
+        return warnings
+    pairing_type = active[0]["aircraft_type"]
+    if ac["type"] == pairing_type:
+        warnings.append({
+            "code": "AC_SAME_TYPE", "severity": "warning",
+            "message": f"{reg} is already the right type — use a normal reassignment.",
+            "rule_ref": "Operational",
+        })
+        return warnings
+
+    sub_seats = AIRCRAFT_TYPES.get(ac["type"], {}).get("seats", 0)
+    orig_seats = AIRCRAFT_TYPES.get(pairing_type, {}).get("seats", 0)
+    if sub_seats < orig_seats:
+        warnings.append({
+            "code": "AC_DOWNGAUGE_UNSUPPORTED", "severity": "critical",
+            "message": (
+                f"{reg} ({ac['type']}, {sub_seats} seats) is smaller than the "
+                f"{pairing_type} ({orig_seats}) this rotation needs. Downgauging means "
+                f"offloading passengers — not offered."
+            ),
+            "rule_ref": "Operational — capacity",
+        })
+
+    # Range. max_block_hr was defined and referenced nowhere until now; this is
+    # what stops an A320 being sent to Singapore.
+    max_block = AIRCRAFT_TYPES.get(ac["type"], {}).get("max_block_hr", 0) * 60
+    longest = max((s["block_min"] for s in active), default=0)
+    if longest > max_block:
+        warnings.append({
+            "code": "AC_RANGE_INSUFFICIENT", "severity": "critical",
+            "message": (
+                f"{reg} ({ac['type']}) tops out at {max_block // 60}h block; the longest "
+                f"sector on this rotation is {longest // 60}h{longest % 60:02d}m."
+            ),
+            "rule_ref": "Aircraft performance — max block",
+        })
+
+    # Stand and runway compatibility at every station the rotation touches.
+    if AERODROME_CODE.get(ac["type"]) == "E":
+        stations = {s["origin"] for s in active} | {s["destination"] for s in active}
+        blocked = sorted(stations - CODE_E_STATIONS)
+        if blocked:
+            warnings.append({
+                "code": "AC_STAND_INCOMPATIBLE", "severity": "critical",
+                "message": (
+                    f"{reg} is an ICAO code-E aircraft; {', '.join(blocked)} cannot take one "
+                    f"on a stand at short notice."
+                ),
+                "rule_ref": "ICAO Annex 14 aerodrome reference code",
+            })
+    return warnings
+
+
+def _substitution_crew_impact(state: dict, pairing_id: str, new_type: str) -> dict:
+    """Who falls off the rotation if it becomes `new_type`, and what opens up.
+
+    The aircraft is the easy part of an upgauge. Only 3 of 179 crew hold more
+    than one type rating, so a substitution generally invalidates the entire
+    rostered crew and demands a bigger complement than the one it just lost."""
+    active = [s for s in _pairing_sectors(state, pairing_id)
+              if s["status"] in _AC_ACTIVE_STATUSES]
+    stood_down, open_ranks = [], {}
+    for s in active:
+        need = _required_crew_for(new_type, s["block_min"])
+        for cid in s.get("assigned_crew_ids", []):
+            c = next((x for x in state["crew"] if x["id"] == cid), None)
+            if c and new_type not in c["qualifications"] and cid not in stood_down:
+                stood_down.append(cid)
+        for rank in ("CP", "FO", "SC", "CC"):
+            open_ranks[rank] = max(open_ranks.get(rank, 0), need.get(rank, 0))
+    rated = {
+        rank: sum(1 for c in state["crew"]
+                  if c["rank"] == rank and new_type in c["qualifications"]
+                  and c["status"] in ("available", "standby"))
+        for rank in ("CP", "FO", "SC", "CC")
+    }
+    return {
+        "stood_down": stood_down,
+        "open_ranks": open_ranks,
+        "rated_available": rated,
+        "crewable": all(rated[r] >= open_ranks.get(r, 0) for r in open_ranks),
+    }
+
+
+def preview_substitute_aircraft(state: dict, pairing_id: str, reg: str) -> dict:
+    """Read-only price for covering a rotation with an off-type tail."""
+    warnings = check_substitution(state, pairing_id, reg)
+    has_critical = any(w["severity"] == "critical" for w in warnings)
+    ac = next((a for a in state.get("fleet", FLEET) if a["reg"] == reg), None)
+    active = [s for s in _pairing_sectors(state, pairing_id)
+              if s["status"] in _AC_ACTIVE_STATUSES]
+    if has_critical or not ac or not active:
+        return {"warnings": warnings, "has_critical": has_critical,
+                "cost_usd": 0, "crew_impact": None}
+
+    orig_type = active[0]["aircraft_type"]
+    # Operating-cost delta, from the per-minute rates the ferry lever already
+    # uses. MIT Airline Data Project puts widebody:narrowbody block-hour cost
+    # at ~1.9x; our 2.4-2.7x is in the right band, slightly steep.
+    rate_sub = FERRY_COST_PER_MIN_USD.get(ac["type"], 15)
+    rate_orig = FERRY_COST_PER_MIN_USD.get(orig_type, 15)
+    block = sum(s["block_min"] for s in active)
+    delta = max(0, block * (rate_sub - rate_orig))
+    return {
+        "warnings": warnings, "has_critical": False,
+        "cost_usd": SUBSTITUTION_SETUP_USD + delta,
+        "setup_usd": SUBSTITUTION_SETUP_USD,
+        "block_cost_delta_usd": delta,
+        "from_type": orig_type, "to_type": ac["type"],
+        "seats_from": AIRCRAFT_TYPES.get(orig_type, {}).get("seats"),
+        "seats_to": AIRCRAFT_TYPES.get(ac["type"], {}).get("seats"),
+        "crew_impact": _substitution_crew_impact(state, pairing_id, ac["type"]),
+    }
+
+
+def substitute_aircraft(state: dict, pairing_id: str, reg: str) -> dict:
+    """Cover a rotation with an off-type tail. Upgauge only."""
+    warnings = check_substitution(state, pairing_id, reg)
+    if any(w["severity"] == "critical" for w in warnings):
+        return {"ok": False, "applied": False, "warnings": warnings,
+                "pairing_id": pairing_id, "reg": reg}
+
+    pv = preview_substitute_aircraft(state, pairing_id, reg)
+    ac = next(a for a in state.get("fleet", FLEET) if a["reg"] == reg)
+    active = [s for s in _pairing_sectors(state, pairing_id)
+              if s["status"] in _AC_ACTIVE_STATUSES]
+    inc = _pending_aircraft_decision_incident(state, pairing_id)
+    grade = _grade_aircraft_decision(state, pairing_id, reg) if inc else None
+
+    previous_reg = active[0]["aircraft_reg"]
+    previous_type = active[0]["aircraft_type"]
+    stood_down = pv["crew_impact"]["stood_down"]
+    for s in active:
+        s["aircraft_reg"] = reg
+        s["aircraft_type"] = ac["type"]
+        # The complement is sized off the new type's certified seating
+        # (ORO.CC.100), not off how many passengers happen to be booked.
+        s["required_crew"] = _required_crew_for(ac["type"], s["block_min"])
+        for cid in list(s.get("assigned_crew_ids", [])):
+            if cid in stood_down:
+                s["assigned_crew_ids"].remove(cid)
+    for cid in stood_down:
+        c = next((x for x in state["crew"] if x["id"] == cid), None)
+        if c:
+            c["assigned_flight_id"] = None
+            if c["status"] == "on_duty":
+                c["status"] = "available"
+
+    state["kpis"]["cost_usd"] += pv["cost_usd"]
+    state["kpis"]["substitutions"] = state["kpis"].get("substitutions", 0) + 1
+    reset_reactionary_delays(state)
+    _log_cascade(state, propagate_reactionary_delays(state), "substitution", pairing_id)
+    _recompute_kpis(state)
+
+    result = {
+        "ok": True, "applied": True, "warnings": warnings,
+        "pairing_id": pairing_id, "reg": reg,
+        "previous_reg": previous_reg, "from_type": previous_type, "to_type": ac["type"],
+        "cost_usd": pv["cost_usd"], "stood_down_crew_ids": stood_down,
+        "open_ranks": pv["crew_impact"]["open_ranks"], "kpis": state["kpis"],
+    }
+    if inc:
+        inc["status"] = "resolved"
+        inc["resolution"] = "aircraft_control_substitute"
+        inc["resolution_label"] = f"Substituted {reg} ({ac['type']}) via Aircraft Control"
+        inc["resolution_note"] = (
+            f"{previous_type} rotation covered by {reg} ({ac['type']}); "
+            f"{len(stood_down)} crew stood down as not type-rated. "
+            f"Cost: ${pv['cost_usd']:,}."
+        )
+        inc["resolved_at"] = state["clock"]
+        inc["decision_grade"] = grade
+        state["decisions_log"].append({
+            "ts": state["clock"], "incident_id": inc["id"],
+            "action": "aircraft_control_substitute", "cost_usd": pv["cost_usd"],
+            "otp_hit": 0, "flight_callsign": inc.get("flight_callsign"),
+            "incident_type": inc.get("type"),
+            "verdict": (grade or {}).get("verdict"),
+        })
+        result["incident_resolved"] = inc["id"]
+        result["decision_grade"] = grade
+    return result
+
+
 def check_aircraft_assignment(state: dict, pairing_id: str, reg: str) -> list[dict]:
     """Legality of putting tail `reg` on a pairing. Aircraft constraints are
     HARD (a physical aircraft cannot be the wrong type, be in two places, or
@@ -1904,6 +2200,10 @@ def check_aircraft_assignment(state: dict, pairing_id: str, reg: str) -> list[di
             "code": "REF_NOT_FOUND", "severity": "critical",
             "message": "Aircraft or rotation reference not found.", "rule_ref": "INTERNAL",
         }]
+
+    aog = _aog_warning(ac, state.get("clock"))
+    if aog:
+        warnings.append(aog)
 
     expired_mel = [m for m in ac.get("mel_items", []) if m.get("expired")]
     if expired_mel:
@@ -2167,6 +2467,10 @@ def check_ferry(state: dict, pairing_id: str, reg: str) -> list[dict]:
         }]
 
     warnings: list[dict] = []
+    aog = _aog_warning(ac, state.get("clock"))
+    if aog:
+        warnings.append(aog)
+
     expired_mel = [m for m in ac.get("mel_items", []) if m.get("expired")]
     if expired_mel:
         cats = ", ".join(f"Cat {m['category']}" for m in expired_mel)
@@ -2457,7 +2761,7 @@ def aircraft_control(state: dict) -> dict:
         rots = sorted(by_reg_rotations.get(ac["reg"], []), key=lambda r: r["std"])
         block = sum(r["block_min"] for r in rots)
         mel_items = ac.get("mel_items", [])
-        grounded = any(m.get("expired") for m in mel_items)
+        grounded = any(m.get("expired") for m in mel_items) or _is_aog(ac, state.get("clock"))
         if grounded and not rots:
             status = "grounded"
         elif not rots:
@@ -3158,6 +3462,13 @@ def tick(state: dict, minutes: int = 30) -> dict:
         }
         if kind == "TECH" and sev == "major":
             inc["requires_aircraft_decision"] = True
+            # The aeroplane is broken. Without this the player could "resolve"
+            # the grounding by assigning the rotation back to the very tail
+            # that had just failed — a no-op that cleared the incident and
+            # unfroze the clock — and the failed tail stayed available for its
+            # later rotations.
+            _ground_aircraft(state, flight["aircraft_reg"], desc, state["clock"])
+            inc["grounded_reg"] = flight["aircraft_reg"]
         # Weather/ATC are "extraordinary circumstances" under EU261/UK261 —
         # a flight disrupted by them owes no passenger compensation however
         # late it eventually arrives.
@@ -3211,6 +3522,12 @@ def tick(state: dict, minutes: int = 30) -> dict:
         inc["severity"] = "major"
         if inc["type"] == "TECH":
             inc["requires_aircraft_decision"] = True
+            # An unattended defect that escalates grounds the tail exactly as
+            # one that arrives major does — this is the commoner of the two
+            # routes into a clock-freezing grounding, and it must not leave
+            # the failed aeroplane quietly available.
+            _ground_aircraft(state, fl["aircraft_reg"], inc["description"], state["clock"])
+            inc["grounded_reg"] = fl["aircraft_reg"]
         fl["delay_min"] += ESCALATION_EXTRA_DELAY_MIN
         if fl["status"] == "scheduled":
             fl["status"] = "delayed"
@@ -3226,6 +3543,9 @@ def tick(state: dict, minutes: int = 30) -> dict:
             "flight_callsign": fl["callsign"],
             "added_min": ESCALATION_EXTRA_DELAY_MIN,
         })
+
+    # Maintenance finishing a rectification puts the tail back on line.
+    released = release_serviceable_aircraft(state)
 
     reactionary = _log_cascade(state, propagate_reactionary_delays(state), "tick")
 
@@ -3275,6 +3595,7 @@ def tick(state: dict, minutes: int = 30) -> dict:
         "new_incidents": new_incidents,
         "reactionary_delays": reactionary,
         "crew_timeouts": crew_timeouts,
+        "aircraft_released": released,
         "superseded_decisions": [i["id"] for i in superseded],
         "curfew_violations": curfew_violations,
         "escalations": escalations,
@@ -3422,13 +3743,29 @@ def _best_aircraft_decision(state: dict, pairing_id: str) -> dict:
     current_reg = sectors[0]["aircraft_reg"] if sectors else None
     candidates = []
     for ac in state.get("fleet", FLEET):
-        if ac["type"] != ac_type or ac["reg"] == current_reg:
+        if ac["reg"] == current_reg:
             continue
-        if any(w["severity"] == "critical" for w in check_ferry(state, pairing_id, ac["reg"])):
+        if ac["type"] == ac_type:
+            if any(w["severity"] == "critical" for w in check_ferry(state, pairing_id, ac["reg"])):
+                continue
+            candidates.append({
+                "choice": ac["reg"],
+                "impact_usd": _simulate_pairing_impact(state, pairing_id, ac["reg"]),
+            })
             continue
+        # Off-type tails are real candidates now that substitution exists. If
+        # the benchmark pretends they do not, a player who correctly upgauges
+        # is graded against a world where their option was impossible.
+        if any(w["severity"] == "critical" for w in check_substitution(state, pairing_id, ac["reg"])):
+            continue
+        sub_pv = preview_substitute_aircraft(state, pairing_id, ac["reg"])
         candidates.append({
             "choice": ac["reg"],
-            "impact_usd": _simulate_pairing_impact(state, pairing_id, ac["reg"]),
+            "substitution": True,
+            # The knock-on cost plus what the substitution itself costs — an
+            # upgauge is not free, so it must not grade as though it were.
+            "impact_usd": (_simulate_pairing_impact(state, pairing_id, ac["reg"])
+                           + sub_pv["cost_usd"]),
         })
     candidates.append({
         "choice": "cancel",

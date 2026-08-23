@@ -42,7 +42,11 @@ export default function CrewDisposition({ state, onChanged }) {
 
     useEffect(() => {
         load();
-    }, [load, state.clock, state.phase]);
+        // Keyed on the state object rather than the clock: acting on a crew
+        // changes neither the clock nor any count, so a handled row would
+        // otherwise sit here until the next tick.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [state]);
 
     async function dispose(crewId, action) {
         setBusy(`${crewId}:${action}`);

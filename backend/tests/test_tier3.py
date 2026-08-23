@@ -53,7 +53,7 @@ def _state(flights, crew=None, fleet=None, clock="2026-06-12T08:00:00+00:00"):
         "fleet": fleet or [{"reg": "G-EAGA", "type": "A320"}],
         "incidents": [], "decisions_log": [], "cascade_log": [],
         "clock": clock, "day_start": "2026-06-12T04:00:00+00:00",
-        "phase": "OPS", "day_number": 1,
+        "phase": "OPS", "day_number": 1, "tick_count": 0,
         "kpis": {
             "otp_pct": 100.0, "legality_breaches": 0, "curfew_violations": 0,
             "compensation_usd": 0, "duty_of_care_usd": 0, "fatigue_index": 0,
@@ -456,3 +456,140 @@ def test_severity_grades_off_time_left_not_a_flat_critical():
                  if w["code"] == "OPEN_SECTOR"}
     assert by_flight["FLT-EGW200"]["severity"] == "critical"
     assert by_flight["FLT-EGW100"]["severity"] == "advisory"
+
+
+# ------------------------------------------------------------ AOG grounding
+
+def _aog_state():
+    out = _flight("EGW100", "G-EAGA", "A320", "10:00", 75, "P1",
+                  origin="LHR", destination="CDG")
+    back = _flight("EGW101", "G-EAGA", "A320", "13:00", 75, "P1",
+                   origin="CDG", destination="LHR")
+    state = _state([out, back], fleet=[
+        {"reg": "G-EAGA", "type": "A320"},
+        {"reg": "G-EAGE", "type": "A320", "spare": True},
+    ])
+    sim._ground_aircraft(state, "G-EAGA", "Technical defect.", state["clock"])
+    inc = {
+        "id": "INC-T", "type": "TECH", "severity": "major",
+        "flight_id": out["id"], "flight_callsign": "EGW100", "status": "open",
+        "resolution": None, "raised_at": state["clock"], "escalated": False,
+        "requires_aircraft_decision": True, "options": [], "grounded_reg": "G-EAGA",
+    }
+    state["incidents"].append(inc)
+    return state, inc
+
+
+def test_a_grounded_tail_cannot_be_reassigned_to_its_own_rotation():
+    # The pause mechanic was bypassable: a major TECH never recorded the tail
+    # as unavailable, so pointing the rotation back at the very aeroplane that
+    # had just failed was accepted as a no-op, resolved the incident and
+    # unfroze the clock.
+    state, inc = _aog_state()
+    assert sim.is_clock_paused(state) is True
+    res = sim.assign_aircraft(state, "P1", "G-EAGA")
+    assert res["ok"] is False
+    assert "AC_GROUNDED" in [w["code"] for w in res["warnings"]]
+    assert inc["status"] == "open"
+    assert sim.is_clock_paused(state) is True
+
+
+def test_a_real_swap_resolves_it_but_leaves_the_broken_tail_grounded():
+    state, inc = _aog_state()
+    res = sim.assign_aircraft(state, "P1", "G-EAGE")
+    assert res["applied"] is True
+    assert inc["status"] == "resolved"
+    assert sim.is_clock_paused(state) is False
+    # The failed tail must not quietly become available for its later flying.
+    broken = next(a for a in state["fleet"] if a["reg"] == "G-EAGA")
+    assert "aog" in broken
+    assert sim._is_aog(broken, state["clock"]) is True
+
+
+def test_a_grounded_tail_cannot_be_ferried_either():
+    state, _ = _aog_state()
+    codes = [w["code"] for w in sim.check_ferry(state, "P1", "G-EAGA")]
+    assert "AC_GROUNDED" in codes
+
+
+def test_maintenance_releases_the_tail_when_the_repair_lands():
+    state, _ = _aog_state()
+    ac = next(a for a in state["fleet"] if a["reg"] == "G-EAGA")
+    state["clock"] = ac["aog"]["serviceable_at"]
+    released = sim.release_serviceable_aircraft(state)
+    assert released == ["G-EAGA"]
+    assert "aog" not in ac
+    assert not any(w["code"] == "AC_GROUNDED"
+                   for w in sim.check_aircraft_assignment(state, "P1", "G-EAGA"))
+
+
+def test_the_fleet_view_shows_a_broken_tail_as_grounded():
+    state, _ = _aog_state()
+    view = sim.aircraft_control(state)
+    entry = next(a for a in view["fleet"] if a["reg"] == "G-EAGA")
+    assert entry["grounded"] is True
+
+
+def test_an_escalating_defect_grounds_the_tail_too():
+    # The commoner route into a clock-freezing grounding: a MINOR tech defect
+    # left unattended for 60 minutes escalates to major and sets
+    # requires_aircraft_decision. Patching only the spawn path left this one
+    # freezing the clock with the failed aeroplane still bookable.
+    f = _flight("EGW100", "G-EAGA", "A320", "12:00", 75, "P1")
+    state = _state([f], fleet=[
+        {"reg": "G-EAGA", "type": "A320"},
+        {"reg": "G-EAGE", "type": "A320", "spare": True},
+    ], clock="2026-06-12T08:00:00+00:00")
+    inc = {
+        "id": "INC-E", "type": "TECH", "severity": "minor",
+        "description": "Technical defect / MEL deferral on aircraft.",
+        "flight_id": f["id"], "flight_callsign": "EGW100", "status": "open",
+        "resolution": None, "raised_at": "2026-06-12T06:00:00+00:00",
+        "escalated": False, "options": [],
+    }
+    state["incidents"].append(inc)
+
+    sim.tick(state, minutes=30)          # >60min unattended -> escalates
+
+    assert inc["escalated"] is True
+    assert inc["requires_aircraft_decision"] is True
+    assert inc["grounded_reg"] == "G-EAGA"
+    ac = next(a for a in state["fleet"] if a["reg"] == "G-EAGA")
+    assert sim._is_aog(ac, state["clock"]) is True
+    assert "AC_GROUNDED" in [
+        w["code"] for w in sim.check_aircraft_assignment(state, "P1", "G-EAGA")]
+
+
+def test_discretion_measures_the_overrun_against_the_standby_reduced_cap():
+    # A home-standby crew past six hours has a REDUCED maximum FDP
+    # (CS FTL.1.225). Discretion used to recompute the table cap without that
+    # reduction, so it approved against a limit that did not apply — and with
+    # a delayed enough pairing could license a duty more than the permitted
+    # extension above the crew's real cap.
+    out = _flight("EGW100", "G-EAGA", "A320", "06:00", 300, "P1",
+                  origin="LHR", destination="CDG", crew_ids=["CP1"])
+    back = _flight("EGW101", "G-EAGA", "A320", "13:00", 300, "P1",
+                   origin="CDG", destination="LHR", crew_ids=["CP1"], delay_min=60)
+    fresh = _crew("CP1", "CP", "Larsen", status="standby",
+                  standby_type=sim.STANDBY_HOME, standby_elapsed_hr=1.0)
+    state = _state([out, back], crew=[fresh])
+    base_overrun = sim.discretion_available(state, "FLT-EGW100", "CP1")["overrun_min"]
+
+    # Same duty, same delays — but this crew has been sitting at home on
+    # standby for nine hours, so three of those hours come off their cap.
+    stale = _crew("CP1", "CP", "Larsen", status="standby",
+                  standby_type=sim.STANDBY_HOME, standby_elapsed_hr=9.0)
+    state2 = _state([out, back], crew=[stale])
+    disc = sim.discretion_available(state2, "FLT-EGW100", "CP1")
+    assert sim._standby_fdp_reduction_min(stale) == 180
+    assert disc["overrun_min"] == base_overrun + 180
+    # And once the reduction pushes it past the 2h cap, discretion refuses.
+    assert disc["available"] is (disc["overrun_min"] <= sim.DISCRETION_MAX_MIN)
+
+
+def test_discretion_never_reports_a_negative_overrun():
+    f = _flight("EGW100", "G-EAGA", "A320", "10:00", 75, "P1", crew_ids=["CP1"])
+    state = _state([f], crew=[_crew("CP1", "CP", "Larsen")])
+    disc = sim.discretion_available(state, "FLT-EGW100", "CP1")
+    assert disc["available"] is False
+    assert disc.get("overrun_min", 0) <= 0 or "No FDP overrun" in disc["reason"]

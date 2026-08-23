@@ -11,8 +11,10 @@ export const api = {
     rosterStatus: (gid) => client.get(`/sim/${gid}/roster_status`).then((r) => r.data),
     precheck: (gid, fid, crewId) =>
         client.post(`/sim/${gid}/check_assignment/${fid}`, { crew_id: crewId }).then((r) => r.data),
-    assign: (gid, fid, crewId, force = false) =>
-        client.post(`/sim/${gid}/assign/${fid}`, { crew_id: crewId, force }).then((r) => r.data),
+    assign: (gid, fid, crewId, force = false, discretion = false) =>
+        client
+            .post(`/sim/${gid}/assign/${fid}`, { crew_id: crewId, force, discretion })
+            .then((r) => r.data),
     unassign: (gid, fid, cid) =>
         client.post(`/sim/${gid}/unassign/${fid}/${cid}`).then((r) => r.data),
     startDay: (gid) => client.post(`/sim/${gid}/start_day`).then((r) => r.data),
