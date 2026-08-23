@@ -123,14 +123,19 @@ def test_assign_flow(session, game):
     assert j2["applied"] is False
     assert any(w["code"] == "TYPE_QUAL" for w in j2["warnings"])
 
-    # invalid + force -> applied true and legality_breaches up
+    # invalid + force -> STILL refused. A type rating is valid only for the
+    # type it was issued on (FCL.740); it is not a commercial call the
+    # controller may take and pay for, so force does not reach it and no
+    # breach is booked. Rest, duty limits and days off remain forceable.
     before = session.get(f"{API}/sim/{game['id']}", timeout=15).json()["kpis"]["legality_breaches"]
     r3 = session.post(f"{API}/sim/{game['id']}/assign/{flight['id']}",
                       json={"crew_id": invalid_id, "force": True}, timeout=15)
     assert r3.status_code == 200
-    assert r3.json()["applied"] is True
+    j3 = r3.json()
+    assert j3["applied"] is False
+    assert "type-rated" in j3.get("reason", "")
     after = session.get(f"{API}/sim/{game['id']}", timeout=15).json()["kpis"]["legality_breaches"]
-    assert after > before
+    assert after == before
 
 
 # ---- 7. unassign ----

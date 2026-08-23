@@ -1221,14 +1221,14 @@ def check_assignment(state: dict, flight_id: str, crew_id: str) -> list[dict]:
 
 # Criticals that no override reaches.
 #
-# TYPE_QUAL is deliberately NOT in this set. Force-assigning an unrated crew
-# applies and books an 80-point legality breach — the documented behaviour,
-# asserted by tests/test_occ_backend.py::test_assign_flow. A research pass
-# argued it should be unforceable (a type rating is a licensing fact under
-# FCL.740, not a commercial judgement, and discretion_available already
-# refuses to cover it). That is a design call for the owner; adding
-# "TYPE_QUAL" here is the whole change if he wants it.
-_UNFORCEABLE_CODES = {"REF_NOT_FOUND"}
+# A type rating is valid only for the type it was issued on (EASA FCL.740).
+# There is no controller judgement that puts an A320-rated pilot in a B777 and
+# no score penalty that makes it acceptable — so unlike rest, duty limits and
+# days off, this is not a commercial call the player may take and pay for.
+# `force` used to clear it along with everything else, which let the wrong
+# type be flown for an 80-point breach. discretion_available already refused
+# to cover it; force now agrees.
+_UNFORCEABLE_CODES = {"TYPE_QUAL", "REF_NOT_FOUND"}
 
 
 def discretion_available(state: dict, flight_id: str, crew_id: str) -> dict:

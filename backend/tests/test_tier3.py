@@ -345,13 +345,10 @@ def test_a_crew_who_never_left_is_still_at_base():
     assert sim._crew_end_of_day_station(state, crew[0]) == "LHR"
 
 
-def test_force_on_an_unrated_crew_applies_and_books_a_breach():
-    # Current, documented behaviour: force is a commercial override that
-    # applies and charges an 80-point legality breach, TYPE_QUAL included.
-    # Flagged in the board log as a design question — a type rating is a
-    # licensing fact under FCL.740, and discretion_available already refuses
-    # to cover it — but this pins what the game does TODAY so a change is a
-    # deliberate one rather than a silent drift.
+def test_an_unrated_crew_cannot_operate_the_type_at_all():
+    # A type rating is valid only for the type it was issued on (FCL.740).
+    # No override reaches it: not force, not discretion. It is not a
+    # commercial call the controller may take and pay for.
     f = _flight("EGW900", "G-EAGN", "B777", "10:00", 700, "P9",
                 origin="LHR", destination="JFK")
     f["required_crew"]["type_qual"] = "B777"
@@ -361,11 +358,13 @@ def test_force_on_an_unrated_crew_applies_and_books_a_breach():
 
     assert sim.assign_crew(state, "FLT-EGW900", "CP1")["applied"] is False
     res = sim.assign_crew(state, "FLT-EGW900", "CP1", force=True)
-    assert res["applied"] is True
-    assert state["kpis"]["legality_breaches"] >= 1
-
-    # Discretion, unlike force, must never reach it.
+    assert res["applied"] is False
+    assert "CP1" not in f["assigned_crew_ids"]
+    # Refused outright, so no breach is booked either — the flight simply
+    # does not go with that crew.
+    assert state["kpis"]["legality_breaches"] == 0
     assert sim.discretion_available(state, "FLT-EGW900", "CP1")["available"] is False
+
 
 
 def test_force_still_covers_a_genuine_commercial_call():
