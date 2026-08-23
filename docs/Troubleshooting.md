@@ -127,13 +127,22 @@ compile can take a minute.
 
 ## In-game
 
-### The Ops Advisor says "Advisor offline"
+### The Ops Advisor says "OPS-ADVISOR OFFLINE"
 
 That's expected if you haven't added an AI key — the rest of the game is
 unaffected. To enable real advice, add an `ANTHROPIC_API_KEY` (see
 [Configuration Reference](Configuration-Reference.md#the-ops-advisor-ai-key)).
-If you *did* add a key and still see this, it may be invalid or out of credit —
-check at <https://console.anthropic.com>.
+If you *did* add a key and still see this, the panel now tells you which of two
+things is wrong:
+
+- **"no ANTHROPIC_API_KEY configured"** — the backend cannot see your key.
+  Either it is genuinely missing, or the `.env` file was saved with a BOM (see
+  [Setup on Windows](Setup-Windows.md) — use `-Encoding ascii`, not `utf8`).
+  Restart the backend after editing `.env`; it only reads the file at startup.
+- **anything else** — the key reached the API and the API objected. It may be
+  invalid, out of credit, or pointed at a model ID that does not exist. Check
+  at <https://console.anthropic.com> and see
+  [Configuration Reference](Configuration-Reference.md#to-change-which-ai-model-it-uses).
 
 ### My saved game disappeared / didn't follow me to another browser
 

@@ -77,6 +77,28 @@ Then open **<http://localhost:3000>** and click **START DUTY**.
 
 ---
 
+## What you actually do
+
+Six desks, switched with `1`–`9`:
+
+| Desk | What it is for |
+| ---- | -------------- |
+| **Roster** | Crew the day's flying, legally. |
+| **Roster Planner** | Shape the week: days off and standby cover across the whole base, plus the open-time list of uncovered flying. |
+| **Aircraft Control** | Fix broken rotations — reassign a tail, ferry a spare empty, upgauge onto a bigger aircraft, or cancel a block to resync. |
+| **Incidents** | Triage disruption as it arrives, against a clock that does not wait. |
+| **Disposition** | Deal with crew stranded away from base. |
+| **Crew / Timeline / Debrief** | See the state, and afterwards see what your decisions cost. |
+
+The rules underneath are the real ones, simplified only where they have to be:
+EASA-style flight duty periods that shrink with a later report and more sectors,
+minimum rest measured against the duty just flown, commander's discretion,
+airport vs home standby, MEL deferrals and AOG groundings, the Heathrow night
+curfew, UK261 compensation and Article 9 duty of care, and knock-on delay
+priced per minute.
+
+---
+
 ## What's inside
 
 | Part | Technology | What it does |
@@ -100,6 +122,9 @@ Everything lives in the **[`docs/` wiki](docs/Home.md)**:
 - **[Configuration Reference](docs/Configuration-Reference.md)** — every setting explained
 - **[Troubleshooting](docs/Troubleshooting.md)** — fixes for common problems
 - **[Developer Guide](docs/Developer-Guide.md)** — architecture, API reference, running the tests
+- **[Research notes](docs/research/)** — the real-world operational research the
+  game's rules are built from, and the running log of what has been proposed,
+  built or rejected
 
 ---
 

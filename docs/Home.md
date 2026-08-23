@@ -10,7 +10,9 @@ copy and paste, with an explanation of what it does.
 ## 🎮 Just want to understand the game?
 
 - **[Game Guide](Game-Guide.md)** — what EGW//OCC is, what you actually *do*,
-  and a full walkthrough of a day in the operations centre.
+  and a full walkthrough of a day in the operations centre: the roster planner,
+  the aircraft desk, the crew disposition desk, and every rule that will bite
+  you.
 
 ## 💻 Want to install and run it?
 

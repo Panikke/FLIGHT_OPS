@@ -36,7 +36,7 @@ ANTHROPIC_API_KEY=""
 | `MONGO_URL` | **Yes** | Where the MongoDB database is. `mongodb://localhost:27017` means "on this computer, the standard port." For a cloud database (MongoDB Atlas) this is the long `mongodb+srv://…` string they give you. |
 | `DB_NAME` | **Yes** | The name of the database. `egw_occ` is fine. The game creates it automatically on first save. |
 | `CORS_ORIGINS` | **Yes** | A safety setting listing which web addresses may talk to the backend. For local play, `http://localhost:3000` is correct. Separate multiple addresses with commas. Use `*` (meaning "allow anything") only for quick local testing. |
-| `ANTHROPIC_API_KEY` | Optional | Unlocks the AI **Ops Advisor**. Leave it as `""` (empty) and the game runs fine — the advisor just shows a canned "offline" message. See below. |
+| `ANTHROPIC_API_KEY` | Optional | Unlocks the AI **Ops Advisor**. Leave it as `""` (empty) and the game runs fine — the advisor says it is offline and tells you the key is missing. See below. |
 
 > **If the backend prints `KeyError: 'MONGO_URL'` when it starts,** it means it
 > couldn't find `backend/.env`, or the file is missing that line. See
@@ -98,13 +98,19 @@ Edit `backend/server.py`, find the `/api/sim/{id}/advisor` route, and change the
 
 ```python
 response = await anthropic_client.messages.create(
-    model="claude-sonnet-4-6",   # or "claude-opus-4-8", "claude-haiku-4-5"
+    model="claude-sonnet-5",   # or "claude-opus-5", "claude-haiku-4-5"
     ...
 )
 ```
 
 Sonnet is the default — a good balance of quality, speed and cost for the short
 advisor replies.
+
+> **Use a model ID that exists.** A wrong one does not fail loudly: every
+> advisor call errors and falls through to the offline reply, which looks
+> exactly like "the feature is broken". If the advisor is not answering, check
+> this line and the API key before anything else — the panel now names which of
+> the two is at fault.
 
 ---
 
