@@ -79,7 +79,8 @@ agenthub/agents/youtube/db
 memory/test_credentials.md
 
 # Mobile development
-android-sdk/-e 
+android-sdk/
+
 # Environment and credential files — real secrets stay out
 .env
 .env.*
@@ -92,3 +93,9 @@ credentials.json
 !.env.example
 !**/.env.example
 !frontend/.env
+
+# Claude Code project tooling: agents/ and commands/ ARE tracked (they
+# configure how this repo gets worked on). The skill cache and the
+# worktree scratch dir are local-only.
+.claude/skills/
+.claude/worktrees/
