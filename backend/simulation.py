@@ -468,7 +468,7 @@ def _add_minutes_to_clock(base_iso: str, minutes: int) -> str:
     return (base + timedelta(minutes=minutes)).isoformat()
 
 
-def _generate_day_flights(day_start_iso: str) -> list[dict]:
+def _generate_day_flights(day_start_iso: str, fleet: list[dict] | None = None, day_number: int = 1) -> list[dict]:
     """Generate flights for the operational day.
     Short-haul: aircraft does multiple out-and-back rotations from LHR.
       Each (outbound + return) pair shares a `pairing_id` — the same crew set
@@ -476,13 +476,17 @@ def _generate_day_flights(day_start_iso: str) -> list[dict]:
     Long-haul: aircraft does ONE outbound today; the return is a next-day
       operation (crew night-stops downroute). Pairing_id is unique to that
       single sector for the day.
+
+    `fleet` should be the PER-GAME fleet (state["fleet"]), not the global
+    template — spares, MEL grounding, and C-check windows all live there.
+    Defaults to the template only for callers with no game state yet.
     """
     flights = []
     day_start = datetime.fromisoformat(day_start_iso)
     fnum = 100
-    for ac in FLEET:
-        if ac.get("spare"):
-            continue  # reserve tail — starts the day idle on stand
+    for ac in (fleet if fleet is not None else FLEET):
+        if _ac_unavailable_reason(ac, day_number):
+            continue  # reserve tail, or grounded (MEL expired / C-check)
         depart_min = random.randint(0, 180)
         if ac["type"] == "A320":
             # 2 to 3 out-and-back rotations in the day, each = 1 pairing
@@ -588,7 +592,10 @@ def new_game(scenario: str = "free_play") -> dict:
     today = datetime.now(timezone.utc).replace(hour=4, minute=0, second=0, microsecond=0)
     day_start_iso = today.isoformat()
     crew = _generate_crew()
-    flights = _generate_day_flights(day_start_iso)
+    fleet = copy.deepcopy(FLEET)
+    for ac in fleet:
+        _schedule_c_check(ac, 0, C_CHECK_INITIAL_STAGGER_DAYS)
+    flights = _generate_day_flights(day_start_iso, fleet, day_number=1)
 
     # Mark some crew as standby pool, some on rest
     random.shuffle(crew)
@@ -608,7 +615,7 @@ def new_game(scenario: str = "free_play") -> dict:
         "scenario": scenario,
         "created_at": now_utc_iso(),
         "airline": AIRLINE,
-        "fleet": copy.deepcopy(FLEET),
+        "fleet": fleet,
         "crew": crew,
         "flights": flights,
         "incidents": [],
@@ -899,13 +906,27 @@ def advance_to_next_day(state: dict) -> dict:
             kept.append(m)
         ac["mel_items"] = kept
 
+    # C-check: once a tail's scheduled maintenance window has fully passed
+    # (or it has none yet — day-1 seeding, see new_game), roll its next one.
+    # Real heavy-check slots are booked ~18 months ahead, so the tail should
+    # always have a known next date, not a gap while we wait to notice.
+    for ac in state.get("fleet", []):
+        if ac.get("spare"):
+            continue
+        cc = ac.get("c_check")
+        if not cc or incoming_day > cc["end_day"]:
+            _schedule_c_check(ac, incoming_day, C_CHECK_INTERVAL_DAYS)
+
     # Advance the day clock
     today_dt = datetime.fromisoformat(state["day_start"])
     next_day_dt = today_dt + timedelta(days=1)
     next_day_iso = next_day_dt.isoformat()
 
     # Generate tomorrow's flights
-    new_flights = _generate_next_day_flights(next_day_iso, long_haul_assignments, state["crew"])
+    new_flights = _generate_next_day_flights(
+        next_day_iso, long_haul_assignments, state["crew"],
+        fleet=state["fleet"], day_number=incoming_day,
+    )
 
     # Pre-roster long-haul returns with yesterday's crew
     pre_rostered = 0
@@ -960,10 +981,17 @@ def advance_to_next_day(state: dict) -> dict:
     }
 
 
-def _generate_next_day_flights(day_start_iso: str, long_haul_returns: dict, crew_list: list[dict]) -> list[dict]:
+def _generate_next_day_flights(day_start_iso: str, long_haul_returns: dict, crew_list: list[dict],
+                                fleet: list[dict] | None = None, day_number: int = 1) -> list[dict]:
     """Generate tomorrow's flights.
     `long_haul_returns` maps crew_id -> {station, origin, destination, block_min, aircraft_reg, aircraft_type}
     Returns list of flight dicts; long-haul returns have `prerostered_crew_ids` set so they're auto-assigned.
+
+    `fleet` should be the PER-GAME fleet (state["fleet"]); `day_number` is the
+    day being generated (`incoming_day`). Without these this used to read the
+    pristine global FLEET template unconditionally, so an expired-MEL or
+    C-check-grounded tail kept flying a full day's rotations regardless of
+    its actual per-game state.
     """
     flights: list[dict] = []
     day_start = datetime.fromisoformat(day_start_iso)
@@ -993,9 +1021,9 @@ def _generate_next_day_flights(day_start_iso: str, long_haul_returns: dict, crew
         fnum += 2
 
     # Short-haul: every A320 does new out-and-backs from LHR
-    for ac in FLEET:
-        if ac.get("spare"):
-            continue  # reserve tail — stays idle unless the controller assigns it
+    for ac in (fleet if fleet is not None else FLEET):
+        if _ac_unavailable_reason(ac, day_number):
+            continue  # reserve tail, or grounded (MEL expired / C-check)
         if ac["type"] != "A320":
             continue
         depart_min = random.randint(0, 180)
@@ -1015,9 +1043,9 @@ def _generate_next_day_flights(day_start_iso: str, long_haul_returns: dict, crew
             depart_min += block + 60
 
     # Long-haul NEW outbounds: any LH aircraft NOT used for a return (i.e. it's at LHR)
-    for ac in FLEET:
-        if ac.get("spare"):
-            continue  # reserve tail — stays idle unless the controller assigns it
+    for ac in (fleet if fleet is not None else FLEET):
+        if _ac_unavailable_reason(ac, day_number):
+            continue  # reserve tail, or grounded (MEL expired / C-check)
         if ac["type"] == "A320":
             continue
         if ac["reg"] in long_haul_regs_used:
@@ -2157,6 +2185,40 @@ def release_serviceable_aircraft(state: dict) -> list[str]:
     return released
 
 
+def _schedule_c_check(ac: dict, after_day: int, interval_range: tuple[int, int]) -> None:
+    """(Re)schedule this tail's next C-check to start `interval_range` days
+    after `after_day`, with a real-scale (already day-sized) duration. Spares
+    don't fly a programme, so scheduling one for them would be invisible
+    busywork — skipped."""
+    if ac.get("spare"):
+        return
+    start = after_day + random.randint(*interval_range)
+    ac["c_check"] = {
+        "start_day": start,
+        "end_day": start + random.randint(*C_CHECK_DURATION_DAYS) - 1,
+    }
+
+
+def _in_c_check(ac: dict, day_number: int) -> bool:
+    cc = ac.get("c_check")
+    return bool(cc and cc["start_day"] <= day_number <= cc["end_day"])
+
+
+def _ac_unavailable_reason(ac: dict, day_number: int) -> str | None:
+    """Why this tail can't be freshly scheduled today, or None if it can.
+    Shared by both day generators so per-game fleet state (MEL/C-check) is
+    actually respected — previously each generator either ignored fleet state
+    entirely or read the pristine global FLEET template, so an expired-MEL or
+    C-check-grounded tail would still get a full day's rotations."""
+    if ac.get("spare"):
+        return "spare"
+    if any(m.get("expired") for m in ac.get("mel_items", [])):
+        return "mel_expired"
+    if _in_c_check(ac, day_number):
+        return "c_check"
+    return None
+
+
 def check_substitution(state: dict, pairing_id: str, reg: str) -> list[dict]:
     """Legality of covering `pairing_id` with an OFF-TYPE tail.
 
@@ -2385,6 +2447,18 @@ def check_aircraft_assignment(state: dict, pairing_id: str, reg: str) -> list[di
                 f"grounded until Maintenance Control clears it. Cannot dispatch."
             ),
             "rule_ref": "MEL deferral limit exceeded",
+        })
+
+    day_number = state.get("day_number", 1)
+    if _in_c_check(ac, day_number):
+        days_left = ac["c_check"]["end_day"] - day_number + 1
+        warnings.append({
+            "code": "AC_IN_MAINTENANCE", "severity": "critical",
+            "message": (
+                f"{reg} is in scheduled heavy maintenance (C-check) — "
+                f"{days_left} day{'s' if days_left != 1 else ''} remaining. Cannot dispatch."
+            ),
+            "rule_ref": "Scheduled maintenance — C-check",
         })
 
     # Sectors already underway or finished keep whatever tail actually flew
@@ -2651,6 +2725,18 @@ def check_ferry(state: dict, pairing_id: str, reg: str) -> list[dict]:
                 f"grounded until Maintenance Control clears it. Cannot dispatch."
             ),
             "rule_ref": "MEL deferral limit exceeded",
+        })
+
+    day_number = state.get("day_number", 1)
+    if _in_c_check(ac, day_number):
+        days_left = ac["c_check"]["end_day"] - day_number + 1
+        warnings.append({
+            "code": "AC_IN_MAINTENANCE", "severity": "critical",
+            "message": (
+                f"{reg} is in scheduled heavy maintenance (C-check) — "
+                f"{days_left} day{'s' if days_left != 1 else ''} remaining. Cannot dispatch."
+            ),
+            "rule_ref": "Scheduled maintenance — C-check",
         })
 
     active_sectors = [s for s in sectors if s["status"] in _AC_ACTIVE_STATUSES]
@@ -2926,13 +3012,18 @@ def aircraft_control(state: dict) -> dict:
         by_reg_rotations.setdefault(secs[0]["aircraft_reg"], []).append(rot)
     rotations.sort(key=lambda r: r["std"])
 
+    day_number = state.get("day_number", 1)
     fleet_view = []
     for ac in fleet:
         rots = sorted(by_reg_rotations.get(ac["reg"], []), key=lambda r: r["std"])
         block = sum(r["block_min"] for r in rots)
         mel_items = ac.get("mel_items", [])
         grounded = any(m.get("expired") for m in mel_items) or _is_aog(ac, state.get("clock"))
-        if grounded and not rots:
+        cc = ac.get("c_check")
+        in_c_check = _in_c_check(ac, day_number)
+        if in_c_check and not rots:
+            status = "c-check"
+        elif grounded and not rots:
             status = "grounded"
         elif not rots:
             status = "spare" if ac.get("spare") else "idle"
@@ -2950,6 +3041,11 @@ def aircraft_control(state: dict) -> dict:
             "spare": bool(ac.get("spare")),
             "mel_items": mel_items,
             "grounded": grounded,
+            # start_day/end_day of the next-known C-check, whether it's
+            # upcoming or currently in progress — real planning always has a
+            # next date booked, so the UI can show it ahead of time either way.
+            "c_check": cc,
+            "in_c_check": in_c_check,
             "rotation_count": len(rots),
             "sectors": sum(r["sectors"] for r in rots),
             "block_min": block,
@@ -2963,6 +3059,7 @@ def aircraft_control(state: dict) -> dict:
         "rotations": rotations,
         "min_turnaround_min": MIN_TURNAROUND_MIN,
         "hub": AIRLINE["hub"],
+        "day_number": day_number,
     }
 
 
@@ -3207,6 +3304,20 @@ MEL_CATEGORY_WEIGHTS = {"B": 0.3, "C": 0.7}
 # rectifies before the next day's ops — most defects get fixed at the next
 # opportunity rather than riding the full deferral window.
 MEL_OVERNIGHT_CLEAR_PROB = 0.7
+
+# Scheduled heavy maintenance (C-check): unlike MEL/AOG, this is KNOWN well in
+# advance — real airlines book a slot ~18 months ahead and the check itself
+# runs 1-4 weeks. The duration is left at that real, already-day-scaled
+# figure; only the INTERVAL between checks is compressed (18-24 real months
+# would essentially never recur within a played campaign) so the mechanic is
+# actually encountered. `C_CHECK_INITIAL_STAGGER_DAYS` is used once per tail
+# at game start so day 1 never opens with a tail already down; every
+# subsequent check uses `C_CHECK_INTERVAL_DAYS`, rolled the moment the
+# previous one's window has fully passed (see _schedule_c_check) — a tail
+# always has its NEXT date visible, matching how far ahead real planning runs.
+C_CHECK_DURATION_DAYS = (4, 9)
+C_CHECK_INITIAL_STAGGER_DAYS = (6, 20)
+C_CHECK_INTERVAL_DAYS = (25, 45)
 
 # A MAJOR tech defect is not MEL-deferrable (see mel_defer's feasibility gate)
 # and cannot simply be held for — the tail is physically unusable. Rather than
