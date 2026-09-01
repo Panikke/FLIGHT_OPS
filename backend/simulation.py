@@ -143,6 +143,8 @@ MAX_DUTY_7D_HR = 60
 MAX_DUTY_7D_MIN = MAX_DUTY_7D_HR * 60
 MIN_TURNAROUND_MIN = 45          # minimum ground time before the same tail departs again
 DIVERSION_RECOVERY_MIN = 120     # extra positioning time after a diversion before next sector
+MIN_CREW_TURNAROUND_MIN = 30     # crew changing aircraft at a station: deplane, transit, brief
+_PROPAGATION_MAX_PASSES = 6      # safety net; each pass only adds, so this converges well inside it
 # LHR night curfew (simplified, inspired by real EGLL noise-abatement rules):
 # movements at the hub between 23:00Z and 06:00Z draw a regulatory fine.
 CURFEW_AIRPORT = "LHR"
@@ -4878,16 +4880,44 @@ def _log_cascade(state: dict, affected: list[dict], trigger: str,
     return affected
 
 
-def propagate_reactionary_delays(state: dict) -> list[dict]:
-    """Roll knock-on (reactionary) delays down each aircraft's day.
+def _apply_reactionary(flight: dict, extra: int, inbound: dict | None,
+                       kind: str) -> dict:
+    """Add `extra` minutes of knock-on to `flight` and record what caused it.
 
-    For every tail, walk its sectors in schedule order tracking when the
-    aircraft is actually ready again (estimated arrival + minimum turnaround).
-    Any later sector that would depart before its aircraft is ready picks up
-    the difference as reactionary delay. Re-running only ever adds delay on
-    top of what's already applied — it cannot shrink a knock-on whose cause
-    has gone away (e.g. a tail swap). Call `reset_reactionary_delays` first
-    when the aircraft-to-rotation mapping has changed.
+    Returns the causal edge for the cascade log so the player can see which
+    inbound made this sector late, not merely that it is late."""
+    flight["delay_min"] = flight.get("delay_min", 0) + extra
+    flight["reactionary_min"] = flight.get("reactionary_min", 0) + extra
+    if flight["status"] == "scheduled":
+        flight["status"] = "delayed"
+    note = flight.get("note") or ""
+    if not note or note.startswith("REACTIONARY"):
+        if inbound is None:
+            flight["note"] = "REACTIONARY (IATA 93) · aircraft late"
+        elif kind == "crew":
+            flight["note"] = (
+                f"REACTIONARY (IATA 93) · crew off {inbound['callsign']} late"
+            )
+        else:
+            flight["note"] = (
+                f"REACTIONARY (IATA 93) · inbound {inbound['callsign']} late"
+            )
+    return {
+        "flight_id": flight["id"],
+        "callsign": flight["callsign"],
+        "added_min": extra,
+        "inbound_callsign": inbound["callsign"] if inbound else None,
+        "kind": kind,
+    }
+
+
+def _aircraft_chain(state: dict) -> list[dict]:
+    """Roll knock-on delay down each tail's day.
+
+    For every aircraft, walk its sectors in schedule order tracking when the
+    tail is actually ready again (estimated arrival + minimum turnaround). Any
+    later sector that would depart before its aircraft is ready picks up the
+    difference.
     """
     affected: list[dict] = []
     by_reg: dict[str, list[dict]] = {}
@@ -4911,22 +4941,7 @@ def propagate_reactionary_delays(state: dict) -> list[dict]:
             ):
                 extra = int((ready_at - eff_dep).total_seconds() // 60)
                 if extra > 0:
-                    f["delay_min"] += extra
-                    f["reactionary_min"] = f.get("reactionary_min", 0) + extra
-                    if f["status"] == "scheduled":
-                        f["status"] = "delayed"
-                    note = f.get("note") or ""
-                    if not note or note.startswith("REACTIONARY"):
-                        f["note"] = (
-                            f"REACTIONARY (IATA 93) · inbound {inbound['callsign']} late"
-                            if inbound else "REACTIONARY (IATA 93) · aircraft late"
-                        )
-                    affected.append({
-                        "flight_id": f["id"],
-                        "callsign": f["callsign"],
-                        "added_min": extra,
-                        "inbound_callsign": inbound["callsign"] if inbound else None,
-                    })
+                    affected.append(_apply_reactionary(f, extra, inbound, "aircraft"))
                     eff_dep = std + timedelta(minutes=f["delay_min"])
             eff_arr = eff_dep + timedelta(minutes=f["block_min"])
             turnaround = MIN_TURNAROUND_MIN + (
@@ -4935,6 +4950,97 @@ def propagate_reactionary_delays(state: dict) -> list[dict]:
             ready_at = eff_arr + timedelta(minutes=turnaround)
             inbound = f
     return affected
+
+
+def _crew_chain(state: dict) -> list[dict]:
+    """Roll knock-on delay down each crew member's day.
+
+    Delay does not only travel with the metal. A crew landing late is late for
+    whatever they operate next, and because crews change aircraft between
+    pairings this spreads delay across tails that never had anything wrong
+    with them — the mechanism behind a large share of real reactionary delay
+    (EUROCONTROL/CODA attribute roughly half of all reactionary minutes to
+    knock-on of this kind, of which crew rotation is a major component).
+
+    The chain only binds when the crew's arrival station is their next
+    departure station: a mismatch is an out-of-position crew, which is a
+    different failure with its own checks, not a delay to be absorbed.
+    Cancelled sectors are skipped, so standing a pairing down genuinely
+    releases its crew for what they fly later.
+    """
+    by_crew: dict[str, list[dict]] = {}
+    for f in state["flights"]:
+        if f["status"] == "cancelled":
+            continue
+        for cid in f.get("assigned_crew_ids", []):
+            by_crew.setdefault(cid, []).append(f)
+
+    # A sector waits for its LAST crew member to make it, so take the worst
+    # case per flight and apply it once rather than once per crew member.
+    worst: dict[str, tuple[int, dict]] = {}
+    for _cid, sectors in by_crew.items():
+        sectors.sort(key=lambda f: f["std"])
+        prev: dict | None = None
+        for f in sectors:
+            if (
+                prev is not None
+                and prev["destination"] == f["origin"]
+                and f["status"] in ("scheduled", "delayed", "boarding")
+            ):
+                prev_dep = (datetime.fromisoformat(prev["std"])
+                            + timedelta(minutes=prev.get("delay_min", 0)))
+                ready_at = prev_dep + timedelta(
+                    minutes=prev["block_min"] + MIN_CREW_TURNAROUND_MIN)
+                eff_dep = (datetime.fromisoformat(f["std"])
+                           + timedelta(minutes=f.get("delay_min", 0)))
+                if eff_dep < ready_at:
+                    extra = int((ready_at - eff_dep).total_seconds() // 60)
+                    if extra > 0 and extra > worst.get(f["id"], (0, None))[0]:
+                        worst[f["id"]] = (extra, prev)
+            prev = f
+
+    by_id = {f["id"]: f for f in state["flights"]}
+    return [_apply_reactionary(by_id[fid], extra, inbound, "crew")
+            for fid, (extra, inbound) in worst.items()]
+
+
+def _coalesce_cascade_edges(edges: list[dict]) -> list[dict]:
+    """Merge repeated edges from the fixed-point passes.
+
+    Reaching the fixed point can add delay to one sector over several passes;
+    the player wants "EGW204 +40m ← EGW201 late", not the same edge four times
+    with a share of the minutes on each."""
+    merged: dict[tuple, dict] = {}
+    for e in edges:
+        key = (e["flight_id"], e["inbound_callsign"], e["kind"])
+        if key in merged:
+            merged[key]["added_min"] += e["added_min"]
+        else:
+            merged[key] = dict(e)
+    return list(merged.values())
+
+
+def propagate_reactionary_delays(state: dict) -> list[dict]:
+    """Roll knock-on (reactionary) delays through both the aircraft and the
+    crew, to a fixed point.
+
+    The two chains feed each other: a late tail delays the crew it carries,
+    and that crew then delays whatever aircraft they board next, which delays
+    that aircraft's later sectors in turn. One pass of each would stop after
+    the first hop, so the passes repeat until nothing further is added.
+
+    Re-running only ever adds delay on top of what's already applied — it
+    cannot shrink a knock-on whose cause has gone away (e.g. a tail swap).
+    Call `reset_reactionary_delays` first when the aircraft-to-rotation or
+    crew-to-rotation mapping has changed.
+    """
+    affected: list[dict] = []
+    for _ in range(_PROPAGATION_MAX_PASSES):
+        step = _aircraft_chain(state) + _crew_chain(state)
+        if not step:
+            break
+        affected.extend(step)
+    return _coalesce_cascade_edges(affected)
 
 
 def _recompute_kpis(state: dict) -> None:

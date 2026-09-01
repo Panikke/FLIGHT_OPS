@@ -59,7 +59,9 @@ export default function CascadeStrip({ state }) {
                             {e.inbound_callsign && (
                                 <>
                                     <span className="t-muted">←</span>
-                                    <span className="t-sec">{e.inbound_callsign} LATE</span>
+                                    <span className="t-sec">
+                                        {e.inbound_callsign} {e.kind === "crew" ? "CREW" : "LATE"}
+                                    </span>
                                 </>
                             )}
                             {mine && (
