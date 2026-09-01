@@ -25,7 +25,22 @@ const STATUS_TONE = {
     boarding: "t-info",
     cancelled: "t-crit",
     grounded: "t-crit",
+    "c-check": "t-warn",
 };
+
+/** "IN 4d" while a check is still ahead, "3d LEFT" once it's live — the same
+ *  {start_day, end_day} record covers both so the UI never loses the date. */
+function cCheckLabel(cc, dayNumber) {
+    if (!cc) return null;
+    if (dayNumber < cc.start_day) {
+        const away = cc.start_day - dayNumber;
+        return `C-CHECK IN ${away}D (${cc.end_day - cc.start_day + 1}D)`;
+    }
+    if (dayNumber <= cc.end_day) {
+        return `C-CHECK · ${cc.end_day - dayNumber + 1}D LEFT`;
+    }
+    return null;
+}
 
 /** A rotation's tone comes from how late it actually is. "delayed" spans
  *  everything from 16 minutes to three hours, and colouring all of it amber
@@ -241,7 +256,7 @@ export default function AircraftControl({ state, onChanged }) {
                                 <span className="t-muted">{ac.type}</span>
                             </div>
                             <div className={`uppercase-wide mt-0.5 ${STATUS_TONE[ac.status] || "t-sec"}`}>
-                                {ac.grounded ? "⛔ GROUNDED" : ac.spare ? "◆ SPARE" : ac.status}
+                                {ac.in_c_check ? "⚙ C-CHECK" : ac.grounded ? "⛔ GROUNDED" : ac.spare ? "◆ SPARE" : ac.status}
                             </div>
                             {!ac.spare && (
                                 <div className="uppercase-wide t-muted mt-0.5">
@@ -257,6 +272,15 @@ export default function AircraftControl({ state, onChanged }) {
                                     MEL ×{ac.mel_items.length} (
                                     {ac.mel_items.map((m) => `${m.expired ? "EXPIRED" : `${m.days_remaining}d`}`).join(", ")}
                                     )
+                                </div>
+                            )}
+                            {ac.c_check && (
+                                <div
+                                    className={`uppercase-wide mt-0.5 ${ac.in_c_check ? "t-crit" : "t-warn"}`}
+                                    data-testid={`c-check-badge-${ac.reg}`}
+                                    title={`Scheduled heavy maintenance: day ${ac.c_check.start_day} → ${ac.c_check.end_day}`}
+                                >
+                                    {cCheckLabel(ac.c_check, view.day_number)}
                                 </div>
                             )}
                         </div>
@@ -377,7 +401,7 @@ function ReassignModal({ state, rotation, fleet, minTurn = 45, hub = "LHR", onCl
     // Same-type tails other than the current one, spares first, then by load.
     const candidates = useMemo(() => {
         const rank = (ac) => {
-            if (ac.grounded) return 2;
+            if (ac.grounded || ac.in_c_check) return 2;
             return tailPosition(ac, rotation.std, hub).at === rotation.origin ? 0 : 1;
         };
         return fleet
@@ -692,6 +716,11 @@ function ReassignModal({ state, rotation, fleet, minTurn = 45, hub = "LHR", onCl
                                         </span>
                                         {ac.grounded && (
                                             <span className="uppercase-wide t-crit">⛔ MEL GROUNDED</span>
+                                        )}
+                                        {ac.in_c_check && (
+                                            <span className="uppercase-wide t-crit">
+                                                ⚙ {cCheckLabel(ac.c_check, state.day_number)}
+                                            </span>
                                         )}
                                     </div>
                                     <div
