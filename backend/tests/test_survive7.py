@@ -4,13 +4,23 @@ import requests
 import pytest
 
 def _load_frontend_url():
-    p = "/app/frontend/.env"
-    if os.path.exists(p):
-        with open(p) as fh:
-            for ln in fh:
-                if ln.startswith("REACT_APP_BACKEND_URL="):
-                    return ln.split("=", 1)[1].strip()
-    return os.environ.get("REACT_APP_BACKEND_URL", "")
+    # Env var wins; otherwise read frontend/.env repo-relative first so the
+    # suite runs on a dev machine, falling back to /app for container deploys.
+    # (Same order as test_occ_backend.py / test_pairings.py / test_campaign.py.)
+    url = os.environ.get("REACT_APP_BACKEND_URL", "")
+    if url:
+        return url
+    candidates = [
+        os.path.join(os.path.dirname(__file__), "..", "..", "frontend", ".env"),
+        "/app/frontend/.env",
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            with open(p) as fh:
+                for ln in fh:
+                    if ln.startswith("REACT_APP_BACKEND_URL="):
+                        return ln.split("=", 1)[1].strip().strip('"')
+    return ""
 
 
 BASE_URL = _load_frontend_url().rstrip('/')
@@ -104,9 +114,10 @@ class TestDifficultyCurve:
         import sys
         sys.path.insert(0, "/app/backend")
         import simulation as simmod
-        import random
-        # Build a survive_7 state in-memory and tick repeatedly
-        random.seed(1234)
+        # Build a survive_7 state in-memory and tick repeatedly. survive_7
+        # already reseeds internally to a fixed value for leaderboard
+        # reproducibility, so no explicit seed is needed (a prior
+        # random.seed(1234) here was dead code — new_game() overwrote it).
         state = simmod.new_game("survive_7")
         state["day_number"] = day
         state["phase"] = "OPS"
