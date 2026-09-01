@@ -59,6 +59,34 @@ Every flight needs a specific mix of crew, following normal airline practice:
 Each flight row shows, for example, `CP1 FO1 SC1 CC4` — that's what you must
 fill.
 
+### A crew's day is measured in hours, not pairings
+
+A crew is not finished for the day when their first pairing lands. Like a real
+short-haul crew, they can fly a **second pairing** — the limit is their Flight
+Duty Period, not a headcount. `LHR-MAD-LHR-DUB-LHR` in one duty is an ordinary
+four-sector day.
+
+What makes that safe is that FDP is measured across the **whole duty**, not per
+pairing. Under ORO.FTL.205 an FDP runs from report to the final on-blocks as
+one continuous span — it does not restart because the crew changed aircraft.
+So the two hours a crew spends sitting at the airport between two out-and-backs
+count as duty exactly as a turnaround does.
+
+Three things therefore limit a second pairing, and the game checks all of them
+before it lets you assign one:
+
+| Check | What it means |
+|---|---|
+| **FDP** | The whole day, report to final on-blocks, must fit inside the cap for the hour they reported and the number of sectors they'll have flown. A crew who reported at 05:00 stays on the 05:00 band all day. |
+| **Position** | They have to already be where the next pairing starts. If they're not, that's a positioning decision — see Crew Disposition. |
+| **Connection** | At least 30 minutes on the ground to get off one aircraft and onto the next. |
+
+The auto-roster builds duties this way too, and deliberately leaves a **30
+minute planning margin** below the legal cap — a duty rostered right up to the
+limit times out on the first minute of delay, and no real planner publishes
+one. You can still go closer to the line by hand; a tight connection or a full
+duty is a judgement call you're allowed to make, and to wear.
+
 ### Assigning crew
 
 You have two ways to fill the roster:
@@ -261,6 +289,13 @@ Every crew carries a live clock, so you can see it coming: the **CREW** desk
 shows hours left, and the problem monitor flags a duty heading for the wall
 before it hits.
 
+Delay also travels **with the crew**, not only with the aircraft. A crew who
+land late are late for whatever they operate next, and because crews change
+aircraft between pairings that spreads delay onto tails that had nothing wrong
+with them. The cascade strip labels which is which — `EGW204 +40m ← EGW201
+CREW` is a sector held for its people, `← EGW201 LATE` one held for its metal.
+They call for different answers.
+
 ### Two costly rules to watch
 
 - **LHR night curfew** — departures or arrivals at Heathrow between **23:00 and
@@ -319,7 +354,8 @@ Crew can't work forever — after too many consecutive duty days they legally
 
 **Duty cells are roster lines.** Each shows the route, report and off-duty
 times, sector count and the FDP the duty consumes against the cap that applies
-to that crew — `LHR-FCO-LHR 09:33/17:33 2 SECTORS FDP 8h00/13h00`. An 05:00
+to that crew — `LHR-MAD-LHR-DUB-LHR 12:10/00:10 4 SECTORS FDP 12h00/12h00`.
+One line is one duty, however many pairings it contains. An 05:00
 four-sector day and a 14:00 single-sector day are very different animals, and
 now they look it.
 

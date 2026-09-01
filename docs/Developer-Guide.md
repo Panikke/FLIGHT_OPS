@@ -67,7 +67,9 @@ backend/
     ├── test_reset_to_zero.py   unit: block cancellation and what it relieves
     ├── test_crew_hours.py      unit: delay-aware FDP, discretion, Art.9 care
     ├── test_tier3.py           unit: FDP tables, standby, deadhead, AOG
-    └── test_disposition.py     unit: disposition desk, bulk planning, open time
+    ├── test_disposition.py     unit: disposition desk, bulk planning, open time
+    ├── test_crew_chain.py      unit: delay chaining through crew, not just metal
+    └── test_duty_days.py       unit: multi-pairing duties, duty-wide FDP, connections
 
 frontend/
 ├── package.json            (uses yarn; craco wraps Create React App)
@@ -165,9 +167,18 @@ them rather than invent alternatives:
   Aircraft type, range, stand size, position and serviceability are not, and
   neither is a crew type rating.
 
+- **A duty is the crew's whole day, not one pairing.** `_duty_fdp_min` spans
+  report to final on-blocks across every sector a crew operates, so the ground
+  time between two pairings counts as duty (ORO.FTL.205). Anything asking "how
+  much duty is this crew on?" — `check_assignment`, `crew_duty_clock`,
+  `discretion_available`, the roster line — must use the duty span, never a
+  single pairing, or the same crew gets a different answer from each.
+
 Everything that changes the world routes through
 `propagate_reactionary_delays`, so knock-on delay stays consistent no matter
-which lever caused it.
+which lever caused it. That propagation chains through **both** the aircraft
+and the crew, and the two feed each other, so it repeats to a fixed point
+rather than making a single pass of each.
 
 ### Quick smoke test
 

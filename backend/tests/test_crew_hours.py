@@ -96,9 +96,13 @@ def test_delay_is_counted_as_flight_duty_period():
 def test_a_delayed_pairing_can_make_a_previously_legal_crew_illegal():
     # The crew was legal at report. Nothing about the roster changed, only the
     # operation slipped, and that alone must be able to break the duty.
+    # Report 08:00, final on-blocks 20:00, +30 post = a 12h30 duty against a
+    # 13h cap. (The 15:00 out of ATH is a 60-minute turn on a 14:00 arrival —
+    # the duty clock is wall-clock now, so a longer sit at ATH would itself
+    # eat the margin this test needs before any delay is applied.)
     flights = [_flight("EGW200", "G-EAGA", "A320", "09:00", 300, "P1",
                        origin="LHR", destination="ATH", crew_ids=["CP1"]),
-               _flight("EGW201", "G-EAGA", "A320", "16:00", 300, "P1",
+               _flight("EGW201", "G-EAGA", "A320", "15:00", 300, "P1",
                        origin="ATH", destination="LHR", crew_ids=["CP1"])]
     crew = [_crew("CP1", "CP", "Larsen")]
     state = _state(flights, crew=crew)
@@ -392,7 +396,11 @@ def test_discretion_is_legal_and_books_no_breach_unlike_force():
 
 def test_discretion_past_the_reporting_threshold_files_a_report():
     state, out, back = _timed_out_state()
-    back["delay_min"] = 130         # overrun comfortably over the 60min trigger
+    # Duty is report 05:00 to on-blocks 18:30 +30 post = 13h30 against a 13h
+    # cap, so the overrun is 30min + whatever delay stands. 80min of delay
+    # puts it at 110 — comfortably past the 60min reporting trigger and still
+    # inside the 120min a commander may exercise.
+    back["delay_min"] = 80
     disc = sim.discretion_available(state, "FLT-EGW100", "CP1")
     assert disc["overrun_min"] > sim.DISCRETION_REPORT_THRESHOLD_MIN
     sim.assign_crew(state, "FLT-EGW100", "CP1", discretion=True)

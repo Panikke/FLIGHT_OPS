@@ -144,6 +144,9 @@ MAX_DUTY_7D_MIN = MAX_DUTY_7D_HR * 60
 MIN_TURNAROUND_MIN = 45          # minimum ground time before the same tail departs again
 DIVERSION_RECOVERY_MIN = 120     # extra positioning time after a diversion before next sector
 MIN_CREW_TURNAROUND_MIN = 30     # crew changing aircraft at a station: deplane, transit, brief
+FDP_REPORT_MIN = 60              # report ahead of the first STD; FDP starts here
+FDP_POSTFLIGHT_MIN = 30          # post-flight duties after final on-blocks
+ROSTER_FDP_BUFFER_MIN = 30       # planning margin kept below the legal FDP cap
 _PROPAGATION_MAX_PASSES = 6      # safety net; each pass only adds, so this converges well inside it
 # LHR night curfew (simplified, inspired by real EGLL noise-abatement rules):
 # movements at the hub between 23:00Z and 06:00Z draw a regulatory fine.
@@ -176,6 +179,54 @@ MAX_CONSECUTIVE_DUTY_DAYS = 6
 DAYS_OFF_WARN_AT = MAX_CONSECUTIVE_DUTY_DAYS - 1
 # Duty codes recorded per crew per day (roster line / calendar cells)
 DUTY_FREE_CODES = ("OFF", "REST", "SICK")   # a day that resets the consecutive-duty count
+
+
+def _duty_sectors_for(state: dict, crew_id: str,
+                      extra: list[dict] | None = None) -> list[dict]:
+    """Every sector this crew is committed to today, in operating order.
+
+    A crew's duty is their whole day, not one pairing. `extra` lets a caller
+    ask what the day would look like with a further pairing added, which is
+    the question `check_assignment` has to answer."""
+    seen = set()
+    sectors = []
+    for f in state["flights"]:
+        if crew_id in f.get("assigned_crew_ids", []) and f["status"] != "cancelled":
+            sectors.append(f)
+            seen.add(f["id"])
+    for f in (extra or []):
+        if f["id"] not in seen and f["status"] != "cancelled":
+            sectors.append(f)
+            seen.add(f["id"])
+    sectors.sort(key=lambda f: f["std"])
+    return sectors
+
+
+def _duty_fdp_min(sectors: list[dict]) -> tuple[int, int, int, int]:
+    """FDP a whole duty period consumes, as
+    (total_min, scheduled_min, delay_min, sector_count).
+
+    ORO.FTL.205 measures a Flight Duty Period from report to the final
+    on-blocks as one continuous span — it does not restart per pairing. So
+    this is wall-clock across the crew's whole day, which means the ground
+    time between two pairings counts as duty exactly as the turnaround
+    between two sectors of one pairing does. Summing pairings instead would
+    let a crew sit at the airport for five hours between two out-and-backs
+    and register none of it, which is precisely the roster a real FTL scheme
+    exists to forbid.
+
+    Delay is the last sector's, which is where the duty actually ends;
+    earlier sectors' delays reach it through `propagate_reactionary_delays`.
+    """
+    if not sectors:
+        return 0, 0, 0, 0
+    first, last = sectors[0], sectors[-1]
+    report = datetime.fromisoformat(first["std"]) - timedelta(minutes=FDP_REPORT_MIN)
+    off_blocks = (datetime.fromisoformat(last["std"])
+                  + timedelta(minutes=last["block_min"] + FDP_POSTFLIGHT_MIN))
+    scheduled = int((off_blocks - report).total_seconds() // 60)
+    delay = last.get("delay_min", 0)
+    return scheduled + delay, scheduled, delay, len(sectors)
 
 
 def _pairing_fdp_min(state: dict, flight: dict) -> tuple[int, int, int, int]:
@@ -1161,17 +1212,30 @@ def check_assignment(state: dict, flight_id: str, crew_id: str) -> list[dict]:
             "rule_ref": "Industrial Agreement Art. 14",
         })
 
-    # FDP — short-haul out-and-back pairing is ONE Flight Duty Period
+    # FDP — one continuous duty period from report to final on-blocks, across
+    # every pairing the crew operates today. A second pairing extends the duty
+    # they are already on; it does not start a fresh one.
     pairing_id = flight.get("pairing_id")
     pairing_flights = [f for f in state["flights"] if pairing_id and f.get("pairing_id") == pairing_id]
     if not pairing_flights:
         pairing_flights = [flight]
+    # Block hours the 28-day limit is counting are the ones being added now.
     pairing_block = sum(pf["block_min"] for pf in pairing_flights)
-    fdp_total, _sched, fdp_delay, pairing_sectors = _pairing_fdp_min(state, flight)
-    projected_fdp = crew["fdp_used_min"] + fdp_total
+    duty_sectors = _duty_sectors_for(state, crew_id, extra=pairing_flights)
+    duty_block = sum(pf["block_min"] for pf in duty_sectors)
+    fdp_total, _sched, fdp_delay, duty_sector_count = _duty_fdp_min(duty_sectors)
+    # Sectors already flown are counted inside the duty span AND in
+    # fdp_used_min; only duty from elsewhere (a ferry or deadhead leg) is
+    # carried on top, or the flown legs count twice.
+    flown_here = sum(f["block_min"] for f in duty_sectors if f["status"] == "landed")
+    prior_elsewhere = max(0, crew.get("fdp_used_min", 0) - flown_here)
+    projected_fdp = prior_elsewhere + fdp_total
+    # The cap is set by when the DUTY started, not by the sector being added:
+    # a crew who reported at 05:00 is on the 05:00 band all day.
+    duty_lead = duty_sectors[0] if duty_sectors else flight
     fdp_max, basis = _fdp_cap_for_flight(
-        flight, sectors=pairing_sectors,
-        acclimatised=_crew_acclimatised(state, crew, flight))
+        duty_lead, sectors=duty_sector_count,
+        acclimatised=_crew_acclimatised(state, crew, duty_lead))
     standby_cut = _standby_fdp_reduction_min(crew)
     if standby_cut:
         fdp_max -= standby_cut
@@ -1184,14 +1248,44 @@ def check_assignment(state: dict, flight_id: str, crew_id: str) -> list[dict]:
             "code": "FDP_EXCEED",
             "severity": "critical",
             "message": (
-                f"Flight Duty Period for this pairing ({pairing_sectors} sector{'s' if pairing_sectors>1 else ''}, "
-                f"{pairing_block//60}h{pairing_block%60:02d}m block) would reach "
+                f"Flight Duty Period for this duty ({duty_sector_count} sector{'s' if duty_sector_count>1 else ''}, "
+                f"{duty_block//60}h{duty_block%60:02d}m block) would reach "
                 f"{projected_fdp//60}h{projected_fdp%60:02d}m, exceeding the maximum "
                 f"{fdp_max//60}h FDP applicable ({basis})."
                 + (f" {fdp_delay}min of that is accumulated delay." if fdp_delay else "")
             ),
             "rule_ref": "ORO.FTL.205 / CS FTL.1.205",
         })
+
+    # Minimum crew connection. The station check above asks whether they are
+    # in the right city; this asks whether they can get off one aircraft and
+    # onto the next in the time the roster allows. Crews changing aircraft
+    # have to deplane, cross the terminal and brief, and a roster that ignores
+    # that is how a "legal" duty becomes an unflyable one. Overridable, like
+    # every other crew constraint — a tight connection is a judgement call,
+    # not a physical impossibility.
+    for prev, nxt in zip(duty_sectors, duty_sectors[1:]):
+        if prev["destination"] != nxt["origin"]:
+            continue
+        prev_arr = (datetime.fromisoformat(prev["std"])
+                    + timedelta(minutes=prev.get("delay_min", 0) + prev["block_min"]))
+        nxt_dep = (datetime.fromisoformat(nxt["std"])
+                   + timedelta(minutes=nxt.get("delay_min", 0)))
+        gap = int((nxt_dep - prev_arr).total_seconds() // 60)
+        if gap < MIN_CREW_TURNAROUND_MIN:
+            warnings.append({
+                "code": "CREW_CONNECTION",
+                "severity": "critical",
+                "message": (
+                    f"Crew {crew['id']} lands {prev['callsign']} at "
+                    f"{prev['destination']} {prev_arr.strftime('%H:%MZ')} and "
+                    f"{nxt['callsign']} departs {nxt_dep.strftime('%H:%MZ')} — a "
+                    f"{gap}min connection against the {MIN_CREW_TURNAROUND_MIN}min "
+                    f"minimum."
+                ),
+                "rule_ref": "Operational — crew connection time",
+            })
+            break
 
     # 7-day duty hours
     pairing_duty_hr = fdp_total / 60
@@ -1300,14 +1394,25 @@ def discretion_available(state: dict, flight_id: str, crew_id: str) -> dict:
     req = flight.get("required_crew", {})
     augmented = req.get("FO", 1) >= 2
     cap = DISCRETION_MAX_MIN_AUGMENTED if augmented else DISCRETION_MAX_MIN
-    total, _sched, _delay, sectors = _pairing_fdp_min(state, flight)
+    # The overrun has to be measured against the same duty-wide FDP that
+    # raised FDP_EXCEED above, or discretion is asked to cover a smaller
+    # number than the one that made the assignment illegal.
+    pairing_id = flight.get("pairing_id")
+    pairing_flights = [f for f in state["flights"]
+                       if pairing_id and f.get("pairing_id") == pairing_id] or [flight]
+    duty_sectors = _duty_sectors_for(state, crew_id, extra=pairing_flights)
+    total, _sched, _delay, sectors = _duty_fdp_min(duty_sectors)
+    duty_lead = duty_sectors[0] if duty_sectors else flight
     fdp_max, _basis = _fdp_cap_for_flight(
-        flight, sectors=sectors, acclimatised=_crew_acclimatised(state, crew, flight))
+        duty_lead, sectors=sectors,
+        acclimatised=_crew_acclimatised(state, crew, duty_lead))
     # CS FTL.1.225: home standby beyond six hours cuts the FDP that follows it.
     # check_assignment applies this; discretion must measure the overrun
     # against the same reduced cap or it licenses a duty nobody may fly.
     fdp_max -= _standby_fdp_reduction_min(crew)
-    overrun = (crew.get("fdp_used_min", 0) + total) - fdp_max
+    flown_here = sum(f["block_min"] for f in duty_sectors if f["status"] == "landed")
+    prior_elsewhere = max(0, crew.get("fdp_used_min", 0) - flown_here)
+    overrun = (prior_elsewhere + total) - fdp_max
     if overrun <= 0:
         return {"available": False, "cap_min": cap, "overrun_min": overrun,
                 "augmented": augmented,
@@ -1485,7 +1590,9 @@ def _duty_line_for(state: dict, crew: dict) -> dict:
     report = datetime.fromisoformat(first["std"]) - timedelta(minutes=60)
     off_duty = (datetime.fromisoformat(last["sta"])
                 + timedelta(minutes=last.get("delay_min", 0) + 30))
-    total, _sched, delay, count = _pairing_fdp_min(state, first)
+    # The line covers the crew's whole day — a two-pairing duty is one line
+    # and one FDP, so reading the first pairing alone would understate it.
+    total, _sched, delay, count = _duty_fdp_min(sectors)
     cap, _basis = _fdp_cap_for_flight(
         first, sectors=count, acclimatised=_crew_acclimatised(state, crew, first))
     cap -= _standby_fdp_reduction_min(crew)
@@ -1769,16 +1876,42 @@ def auto_roster(state: dict) -> dict:
                     c for c in state["crew"]
                     if c["rank"] == rank
                     and type_q in c["qualifications"]
-                    and c["status"] in ("available", "standby")
+                    and c["status"] in ("available", "standby", "on_duty")
                     and c["id"] not in all_assigned_ids
                 ]
-                # Prefer lowest fatigue, then most rested
-                candidates.sort(key=lambda c: (c["fatigue_score"], -c["rest_hr_since_duty"]))
+                # Build productive duty days rather than spending a fresh crew
+                # on every pairing: a crew already on duty and in the right
+                # place is the natural person to fly the next rotation, which
+                # is how real short-haul rostering works and why FDP — not
+                # headcount — is meant to be the binding constraint. Anyone
+                # who cannot legally or physically take it is rejected by the
+                # full check below (duty-wide FDP, station, connection, rest).
+                # Within each group, lowest fatigue and most rested first.
+                candidates.sort(key=lambda c: (
+                    0 if c["status"] == "on_duty" else 1,
+                    c["fatigue_score"], -c["rest_hr_since_duty"]))
 
                 placed = False
                 for candidate in candidates:
                     warnings = check_assignment(state, flight["id"], candidate["id"])
                     if not any(w["severity"] == "critical" for w in warnings):
+                        # Legal is not the same as sensible. Extending a duty
+                        # right up to the cap leaves a crew who time out on
+                        # the first minute of delay, and no planner publishes
+                        # a roster with no margin in it — real crew planning
+                        # builds to a planned limit below the legal one. Only
+                        # applies to extensions: a crew's first pairing is the
+                        # schedule's shape, not a choice being made here.
+                        if candidate["status"] == "on_duty":
+                            duty = _duty_sectors_for(state, candidate["id"],
+                                                     extra=pairing_flights)
+                            d_total, _ds, _dd, d_n = _duty_fdp_min(duty)
+                            d_cap, _db = _fdp_cap_for_flight(
+                                duty[0], sectors=d_n,
+                                acclimatised=_crew_acclimatised(
+                                    state, candidate, duty[0]))
+                            if d_cap - d_total < ROSTER_FDP_BUFFER_MIN:
+                                continue
                         # Assign across all pairing sectors
                         for pf in pairing_flights:
                             if candidate["id"] not in pf["assigned_crew_ids"]:
@@ -4797,13 +4930,15 @@ def crew_duty_clock(state: dict, crew_id: str) -> dict | None:
         }
     assigned.sort(key=lambda f: f["std"])
     lead = assigned[0]
-    total, scheduled, delay, sectors = _pairing_fdp_min(state, lead)
+    # The duty spans every sector this crew operates today, however many
+    # pairings that is — a crew on a second pairing is on the same FDP, not
+    # a fresh one.
+    total, scheduled, delay, sectors = _duty_fdp_min(assigned)
     cap, basis = _fdp_cap_for_flight(
         lead, sectors=sectors, acclimatised=_crew_acclimatised(state, crew, lead))
-    # `_pairing_fdp_min` spans the WHOLE pairing, report to final on-blocks —
-    # including sectors already flown. Those sectors have also been added to
-    # fdp_used_min as they landed, so only duty from OTHER pairings may be
-    # carried on top, or the flown legs get counted twice.
+    # The duty span covers sectors already flown. Those have also been added
+    # to fdp_used_min as they landed, so only duty from elsewhere (a ferry or
+    # deadhead leg) may be carried on top, or the flown legs count twice.
     flown_here = sum(f["block_min"] for f in assigned if f["status"] == "landed")
     prior_duty = max(0, crew.get("fdp_used_min", 0) - flown_here)
     projected = prior_duty + total
