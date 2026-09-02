@@ -1,44 +1,61 @@
 # Session Summary — FLIGHT_OPS (EGW//OCC)
-Last checkpoint: 2026-08-28. 5 checkpoints so far.
+Last checkpoint: 2026-09-02. 6 checkpoints so far.
 
 ## Resume point
-PR #30 (`claude/scheduled-c-check`) opened and pushed — item 4 of the
-Aircraft-Fleet-Management-Research.md backlog, built end-to-end and verified
-live in the browser. Not yet merged (Dan merges fast — check `git log
-origin/main` before assuming it's still open).
+PR #30 (`claude/scheduled-c-check`) is **merged** — `origin/main` is now
+a660c00. That was item 4 of the Aircraft-Fleet-Management-Research.md ranked
+list, built end-to-end and verified live in the browser. Of that original
+5-item list, items 1-3 (MEL, crew type-rating hard-block, reset-to-zero) and
+now item 4 are all done; genuinely still open is **(5) advisor surfacing
+"spare available but no legal crew"** (partially subsumed by the
+ferry/deadhead crew-feasibility preview, but not advisor-specific).
 
 While verifying PR #30, found the backend test suite was genuinely flaky:
 `new_game("free_play")` calls unseeded `random.seed()`, so the full suite
 fails a different random test on repeated runs even with zero code changes
 (confirmed on a clean `main` too — not caused by the C-check work). Fixed on
-a second branch, `claude/deterministic-free-play-seed` (off `origin/main`,
-independent of PR #30): added an optional `seed` param to `new_game()`
-(gameplay untouched — only takes effect when a caller passes it), rewired 6
-tests in `test_disposition.py` that had DEAD `random.seed(N)` calls before
-`sim.new_game("free_play")` (the reseed inside `new_game()` was silently
-discarding them) to pass `seed=` directly instead, and removed a similarly
-dead `random.seed(1234)` in `test_survive7.py` (harmless there — survive_7
-already reseeds internally — but misleading). **Also found a real, rare
-latent bug while doing this**: with a fixed seed, `auto_roster` sometimes
-can't fully cover one B777's FO demand (hit at `seed=2`, not at 14 other
-seeds tried) — swapped that one test to `seed=1` rather than papering over
-it, and left the actual gap noted inline for a future session. Verified the
-fix: full suite (235/235) passes identically across 5 consecutive runs with
-zero variance. Not yet committed/pushed on this second branch.
+a second branch, `claude/deterministic-free-play-seed`: added an optional
+`seed` param to `new_game()` (gameplay untouched — only takes effect when a
+caller passes it), rewired 6 tests in `test_disposition.py` that had DEAD
+`random.seed(N)` calls before `sim.new_game("free_play")` (the reseed inside
+`new_game()` was silently discarding them) to pass `seed=` directly instead,
+and removed a similarly dead `random.seed(1234)` in `test_survive7.py`
+(harmless there — survive_7 already reseeds internally — but misleading).
+**Also found a real, rare latent bug while doing this**: with a fixed seed,
+`auto_roster` sometimes can't fully cover one B777's FO demand (hit at
+`seed=2`, not at 14 other seeds tried) — swapped that one test to `seed=1`
+rather than papering over it, and left the actual gap noted inline for a
+future session. That branch is pushed (94a374e — the seed commit plus two
+further feature commits: multi-pairing duty days, and reactionary delay
+chaining through crew) but has **no PR open**.
 
-**Next step**: commit + push + PR the seed-determinism fix
-(`claude/deterministic-free-play-seed`), similar flow to the others. Then,
-if nothing else comes up: the one remaining open research item — **(5)
-advisor surfacing "spare available but no legal crew"** (partially subsumed
-by the ferry/deadhead crew-feasibility preview, but not advisor-specific) —
-or the newly-found rare auto-roster FO-shortage gap.
+**PR #31** (`claude/hungry-jemison-b1e6b2`) is open off the back of that:
+the two `TestBunkFDP` ULR tests in `test_survive7.py` used to `pytest.skip`
+when the generated free_play day happened to contain no ULR (>540min block)
+sector — roughly 3% of runs per test, so the augmented-crew rules went
+untested much of the time. Both now build state in process with
+`new_game("free_play", seed=4)` (three ULR sectors, both wide-body types)
+instead of going through `POST /api/sim/new`. No seed is plumbed through the
+HTTP endpoint on purpose — that would let a player reroll a game.
+`test_precheck_message_mentions_18h_bunk_extension` also now actually asserts
+on the `FDP_EXCEED` message it was named for; previously it joined the
+warnings into a variable and never checked it. 222 passing, zero skips,
+three consecutive runs. Note that branch **carries the seed commit 96a765c
+itself** (fast-forwarded onto it, same SHA, so nothing duplicates when the
+seed branch merges).
 
-(Two checkpoints ago was badly stale — described a large body of work as
-"uncommitted, not yet PR'd" when it had actually shipped via PR #25 plus a
-full second realism-board wave on top. **Lesson: verify `git log`/`git
-status` against the summary's claims before trusting it — don't assume the
-file is current just because it exists.** Every claim in this checkpoint was
-verified against real git/test-run output before writing.)
+**Next step**: PR the seed-determinism branch
+(`claude/deterministic-free-play-seed`) if it's still wanted separately —
+its first commit is already in flight via PR #31, so consider whether it
+wants rebasing onto whatever lands first. Then: item (5) advisor surfacing,
+or the rare auto-roster FO-shortage gap.
+
+(A checkpoint from 2026-07-26 was badly stale — it described a large body of
+work as "uncommitted, not yet PR'd" when it had actually shipped via PR #25
+plus a full second realism-board wave on top. **Lesson: verify `git
+log`/`git status` against the summary's claims before trusting it — don't
+assume the file is current just because it exists.** Every claim in this
+checkpoint was verified against real git output before writing.)
 
 ## Standing facts
 - **Project**: EGW//OCC — airline crew-control simulation game. Repo
