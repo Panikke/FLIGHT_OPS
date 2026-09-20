@@ -2141,7 +2141,14 @@ def preview_deadhead(state: dict, flight_id: str, crew_id: str | None = None) ->
 
 def _ground_aircraft(state: dict, reg: str, reason: str, at_iso: str) -> dict | None:
     """Put a tail on the ground until maintenance clears it."""
-    ac = next((a for a in state.get("fleet", FLEET) if a["reg"] == reg), None)
+    # Minimal unit-test states sometimes omit fleet. Never mutate the module
+    # template in that case: an AOG in one scenario must not ground the same
+    # registration in the next scenario.
+    fleet = state.get("fleet")
+    if fleet is None:
+        fleet = copy.deepcopy(FLEET)
+        state["fleet"] = fleet
+    ac = next((a for a in fleet if a["reg"] == reg), None)
     if ac is None:
         return None
     repair_min = random.randint(AOG_REPAIR_MIN_LOW, AOG_REPAIR_MIN_HIGH)
@@ -3600,13 +3607,13 @@ def release_superseded_aircraft_decisions(state: dict) -> list[dict]:
 
 
 def is_clock_paused(state: dict) -> bool:
-    """True while any open incident requires an aircraft decision — a
-    grounded tail (major TECH) that can only be resolved by the player
-    reassigning a real tail via Aircraft Control or cancelling the rotation.
-    Nothing else about the operation is allowed to move while this is true.
+    """Compatibility indicator for an unresolved grounded-aircraft decision.
 
-    A decision whose rotation has since gone does not count: it is not a
-    decision any more, it is a dead end."""
+    The name is retained for saved-game/API compatibility. The clock no longer
+    freezes for this condition: the affected rotation holds while the rest of
+    the operation keeps moving. Callers that need to describe the condition
+    should treat this as ``grounded decision pending``, not a transport lock.
+    """
     return any(
         i["status"] == "open" and i.get("requires_aircraft_decision")
         and _aircraft_decision_still_open(state, i)
@@ -3614,27 +3621,98 @@ def is_clock_paused(state: dict) -> bool:
     )
 
 
+def _resolve_rectified_aircraft_decisions(state: dict, released_regs: list[str]) -> list[dict]:
+    """Close grounding incidents when Maintenance has returned the tail.
+
+    Waiting is a legitimate recovery choice, but it is never free: while the
+    tail is AOG its scheduled sectors accrue real delay and propagate through
+    the network. Once Engineering releases it, no manual tail decision remains
+    outstanding.
+    """
+    released = set(released_regs)
+    resolved = []
+    for inc in state.get("incidents", []):
+        if (
+            inc.get("status") == "open"
+            and inc.get("requires_aircraft_decision")
+            and inc.get("grounded_reg") in released
+        ):
+            inc["status"] = "resolved"
+            inc["resolution"] = "maintenance_rectified"
+            inc["resolution_label"] = "Maintenance rectified — tail returned to service"
+            inc["resolution_note"] = (
+                f"{inc['grounded_reg']} returned to service after an AOG hold; "
+                "delay incurred while the rotation waited for rectification."
+            )
+            inc["resolved_at"] = state.get("clock")
+            inc["requires_aircraft_decision"] = False
+            resolved.append(inc)
+    return resolved
+
+
+def _apply_aog_holds(state: dict) -> list[dict]:
+    """Hold only the flights whose assigned tail is currently unserviceable.
+
+    An AOG must not allow a flight to become airborne merely because the main
+    simulation clock advanced. Conversely, it must not stop every other tail
+    in the network. Delay is measured from the scheduled effective departure,
+    then retained when the aircraft is repaired or swapped so the downstream
+    consequences remain visible and auditable.
+    """
+    clock = datetime.fromisoformat(state["clock"])
+    fleet_by_reg = {ac["reg"]: ac for ac in state.get("fleet", FLEET)}
+    held = []
+    for flight in state.get("flights", []):
+        if flight.get("status") not in _AC_ACTIVE_STATUSES:
+            continue
+        ac = fleet_by_reg.get(flight.get("aircraft_reg"))
+        if not ac or not _is_aog(ac, state["clock"]):
+            # A swap or maintenance release lets the delayed flight resume;
+            # preserve delay_min but remove the temporary AOG hold marker.
+            flight.pop("aog_hold_started_at", None)
+            flight.pop("aog_hold_base_delay_min", None)
+            flight.pop("aog_hold_reg", None)
+            continue
+
+        base_delay = flight.get("aog_hold_base_delay_min", flight.get("delay_min", 0))
+        effective_std = datetime.fromisoformat(flight["std"]) + timedelta(minutes=base_delay)
+        aog_since = datetime.fromisoformat(ac["aog"]["since"])
+        hold_start = max(effective_std, aog_since)
+        if clock < hold_start:
+            continue
+
+        flight["aog_hold_started_at"] = hold_start.isoformat()
+        flight["aog_hold_base_delay_min"] = base_delay
+        flight["aog_hold_reg"] = ac["reg"]
+        hold_min = max(0, math.ceil((clock - hold_start).total_seconds() / 60))
+        flight["delay_min"] = base_delay + hold_min
+        flight["status"] = "delayed"
+        held.append({
+            "flight_id": flight["id"],
+            "callsign": flight["callsign"],
+            "reg": ac["reg"],
+            "hold_min": hold_min,
+        })
+    return held
+
+
 def tick(state: dict, minutes: int = 30) -> dict:
     """Advance the simulation clock by `minutes`. May spawn incidents."""
     if state["phase"] != "OPS":
         return {"ok": False, "reason": "Not in OPS phase"}
-    # Close out any grounding decision whose rotation has gone before deciding
-    # whether the clock is frozen, or the sim wedges on a dead end.
+    # Close out a grounding decision whose rotation has gone. The decision is
+    # still retained for the debrief, but it cannot keep appearing as live work.
     superseded = release_superseded_aircraft_decisions(state)
-    if is_clock_paused(state):
-        blocking = [
-            i["id"] for i in state["incidents"]
-            if i["status"] == "open" and i.get("requires_aircraft_decision")
-        ]
-        return {
-            "ok": True, "paused": True, "blocking_incidents": blocking,
-            "new_incidents": [], "reactionary_delays": [], "curfew_violations": [],
-            "escalations": [], "compensation_events": [],
-            "superseded_decisions": [i["id"] for i in superseded],
-        }
     state["tick_count"] += 1
     clock = datetime.fromisoformat(state["clock"]) + timedelta(minutes=minutes)
     state["clock"] = clock.isoformat()
+
+    # Engineering can return a tail while the rest of the operation is moving.
+    # Release before lifecycle progression so a repaired aircraft may resume
+    # its delayed programme in this same tick.
+    released = release_serviceable_aircraft(state)
+    rectified = _resolve_rectified_aircraft_decisions(state, released)
+    aog_holds = _apply_aog_holds(state)
 
     # ---- Flight lifecycle progression ----
     curfew_violations = []
@@ -3642,6 +3720,10 @@ def tick(state: dict, minutes: int = 30) -> dict:
     care_events = []
     for f in state["flights"]:
         if f["status"] in ("cancelled", "diverted", "landed"):
+            continue
+        # Its particular rotation is stopped by a physical AOG, not by a UI
+        # modal. Other tails continue through this loop normally.
+        if f.get("aog_hold_started_at"):
             continue
         delay = f.get("delay_min", 0)
         std_dt = datetime.fromisoformat(f["std"]) + timedelta(minutes=delay)
@@ -3799,6 +3881,11 @@ def tick(state: dict, minutes: int = 30) -> dict:
     for inc in state["incidents"]:
         if inc["status"] != "open" or inc.get("escalated"):
             continue
+        # A major technical fault is already grounded and accrues pressure by
+        # holding its own rotation every tick. Adding the generic escalation
+        # penalty on top would charge the same unresolved fault twice.
+        if inc.get("requires_aircraft_decision"):
+            continue
         raised = datetime.fromisoformat(inc["raised_at"])
         if (clock - raised).total_seconds() / 60 < ESCALATION_AFTER_MIN:
             continue
@@ -3830,9 +3917,6 @@ def tick(state: dict, minutes: int = 30) -> dict:
             "flight_callsign": fl["callsign"],
             "added_min": ESCALATION_EXTRA_DELAY_MIN,
         })
-
-    # Maintenance finishing a rectification puts the tail back on line.
-    released = release_serviceable_aircraft(state)
 
     reactionary = _log_cascade(state, propagate_reactionary_delays(state), "tick")
 
@@ -3883,6 +3967,8 @@ def tick(state: dict, minutes: int = 30) -> dict:
         "reactionary_delays": reactionary,
         "crew_timeouts": crew_timeouts,
         "aircraft_released": released,
+        "maintenance_rectified": [i["id"] for i in rectified],
+        "aog_holds": aog_holds,
         "superseded_decisions": [i["id"] for i in superseded],
         "curfew_violations": curfew_violations,
         "escalations": escalations,
@@ -5159,6 +5245,178 @@ def end_day(state: dict) -> dict:
         "flights": state["flights"],
         "open_incidents": len(open_inc),
         "decisions": state["decisions_log"],
+    }
+
+
+def _occ_flight_summary(flight: dict) -> dict:
+    """The small, presentation-safe flight shape used by the LIVE OCC desk."""
+    delay = flight.get("delay_min", 0)
+    std = datetime.fromisoformat(flight["std"])
+    sta = datetime.fromisoformat(flight["sta"])
+    estimated_departure = std + timedelta(minutes=delay)
+    estimated_arrival = sta + timedelta(minutes=delay)
+    curfew_movement = estimated_arrival if flight["destination"] == CURFEW_AIRPORT else (
+        estimated_departure if flight["origin"] == CURFEW_AIRPORT else None
+    )
+    curfew_exposure = "none"
+    if curfew_movement:
+        if _in_curfew_window(curfew_movement):
+            curfew_exposure = "confirmed"
+        elif curfew_movement.hour == CURFEW_START_HOUR - 1 and curfew_movement.minute >= 30:
+            curfew_exposure = "risk"
+    return {
+        "id": flight["id"],
+        "callsign": flight["callsign"],
+        "route": f"{flight['origin']}→{flight['destination']}",
+        "origin": flight["origin"],
+        "destination": flight["destination"],
+        "aircraft_reg": flight["aircraft_reg"],
+        "aircraft_type": flight["aircraft_type"],
+        "pairing_id": flight.get("pairing_id"),
+        "status": flight["status"],
+        "std": std.isoformat(),
+        "sta": sta.isoformat(),
+        "scheduled_departure": std.strftime("%H:%MZ"),
+        "estimated_departure": estimated_departure.strftime("%H:%MZ"),
+        "estimated_arrival": estimated_arrival.strftime("%H:%MZ"),
+        "delay_min": delay,
+        "reactionary_min": flight.get("reactionary_min", 0),
+        "curfew_exposure": curfew_exposure,
+        "aog_hold": bool(flight.get("aog_hold_started_at")),
+    }
+
+
+def _occ_incident_priority(state: dict, incident: dict) -> tuple:
+    """Rank live work by operational consequence, then by time left to act."""
+    if incident.get("requires_aircraft_decision"):
+        bucket = 0
+    elif incident.get("severity") == "major" or incident.get("escalated"):
+        bucket = 1
+    else:
+        bucket = 2
+    raised = datetime.fromisoformat(incident["raised_at"])
+    elapsed = (datetime.fromisoformat(state["clock"]) - raised).total_seconds() / 60
+    until_escalation = max(0, ESCALATION_AFTER_MIN - elapsed)
+    return bucket, until_escalation, incident["raised_at"]
+
+
+def operational_workspace(state: dict, focus_flight_id: str | None = None) -> dict:
+    """Build the common operating picture for the LIVE OCC workspace.
+
+    This deliberately exposes one shared view instead of asking the frontend
+    to stitch together separate incident, timeline, aircraft and crew screens.
+    It is a read-only projection of the existing engine state; all recovery
+    decisions still route through their established simulation functions.
+    """
+    live_incidents = [i for i in state.get("incidents", []) if i.get("status") == "open"]
+    live_incidents.sort(key=lambda i: _occ_incident_priority(state, i))
+    by_flight = {f["id"]: f for f in state.get("flights", [])}
+    fleet_by_reg = {a["reg"]: a for a in state.get("fleet", FLEET)}
+
+    priority_queue = []
+    for position, incident in enumerate(live_incidents, start=1):
+        flight = by_flight.get(incident.get("flight_id"))
+        bucket, due_in, _raised = _occ_incident_priority(state, incident)
+        priority_queue.append({
+            "priority": position,
+            "incident_id": incident["id"],
+            "type": incident["type"],
+            "severity": incident["severity"],
+            "callsign": incident.get("flight_callsign"),
+            "route": f"{flight['origin']}→{flight['destination']}" if flight else None,
+            "flight_id": incident.get("flight_id"),
+            "requires_aircraft_decision": bool(incident.get("requires_aircraft_decision")),
+            "escalated": bool(incident.get("escalated")),
+            "escalates_in_min": None if incident.get("escalated") else math.ceil(due_in),
+            "description": incident["description"],
+            "reported_by": incident.get("reported_by"),
+            "priority_band": ("grounded" if bucket == 0 else "major" if bucket == 1 else "routine"),
+        })
+
+    focus = by_flight.get(focus_flight_id) if focus_flight_id else None
+    if focus is None and priority_queue:
+        focus = by_flight.get(priority_queue[0]["flight_id"])
+    if focus is None:
+        clock = datetime.fromisoformat(state["clock"])
+        candidates = [
+            f for f in state.get("flights", [])
+            if f["status"] in _AC_ACTIVE_STATUSES and datetime.fromisoformat(f["std"]) >= clock
+        ]
+        focus = min(candidates, key=lambda f: f["std"], default=None)
+
+    network = []
+    for reg, ac in fleet_by_reg.items():
+        tail_flights = sorted(
+            (f for f in state.get("flights", []) if f.get("aircraft_reg") == reg),
+            key=lambda f: f["std"],
+        )
+        aog = ac.get("aog") if _is_aog(ac, state.get("clock")) else None
+        network.append({
+            "reg": reg,
+            "type": ac["type"],
+            "spare": bool(ac.get("spare")),
+            "grounded": bool(aog),
+            "maintenance_estimate": aog.get("serviceable_at") if aog else None,
+            "flights": [_occ_flight_summary(f) for f in tail_flights],
+        })
+    network.sort(key=lambda row: (not row["grounded"], not row["spare"], row["reg"]))
+
+    selected = None
+    if focus:
+        focus_summary = _occ_flight_summary(focus)
+        tail_flights = sorted(
+            (
+                f for f in state.get("flights", [])
+                if f.get("aircraft_reg") == focus.get("aircraft_reg")
+                and f.get("status") in _AC_ACTIVE_STATUSES
+                and f["std"] > focus["std"]
+            ),
+            key=lambda f: f["std"],
+        )
+        crew = []
+        for crew_id in focus.get("assigned_crew_ids", []):
+            member = next((c for c in state.get("crew", []) if c["id"] == crew_id), None)
+            if not member:
+                continue
+            duty = crew_duty_clock(state, crew_id)
+            crew.append({
+                "id": member["id"],
+                "name": member["name"],
+                "rank": member["rank"],
+                "status": member["status"],
+                "fatigue": member.get("fatigue_score"),
+                "duty_slack_min": duty.get("slack_min") if duty else None,
+            })
+        ac = fleet_by_reg.get(focus["aircraft_reg"], {})
+        aog = ac.get("aog") if _is_aog(ac, state.get("clock")) else None
+        related = [i for i in live_incidents if i.get("flight_id") == focus["id"]]
+        selected = {
+            "flight": focus_summary,
+            "aircraft": {
+                "reg": focus["aircraft_reg"],
+                "type": focus["aircraft_type"],
+                "grounded": bool(aog),
+                "maintenance_estimate": aog.get("serviceable_at") if aog else None,
+            },
+            "crew": crew,
+            "incidents": [
+                {"id": i["id"], "type": i["type"], "severity": i["severity"], "description": i["description"]}
+                for i in related
+            ],
+            "downstream": [_occ_flight_summary(f) for f in tail_flights[:5]],
+            "impact": {
+                "downstream_sectors": len(tail_flights),
+                "downstream_delay_min": sum(f.get("delay_min", 0) for f in tail_flights),
+                "reactionary_delay_min": focus.get("reactionary_min", 0),
+                "curfew_exposure": focus_summary["curfew_exposure"],
+            },
+        }
+
+    return {
+        "clock": state.get("clock"),
+        "priority_queue": priority_queue,
+        "network": network,
+        "selected": selected,
     }
 
 

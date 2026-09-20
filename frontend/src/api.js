@@ -34,6 +34,8 @@ export const api = {
         client.post(`/sim/${gid}/crew/${crewId}/day_off`, { day, off }).then((r) => r.data),
     aircraftControl: (gid) => client.get(`/sim/${gid}/aircraft_control`).then((r) => r.data),
     irregularities: (gid) => client.get(`/sim/${gid}/irregularities`).then((r) => r.data),
+    occWorkspace: (gid, flightId) =>
+        client.get(`/sim/${gid}/occ`, { params: flightId ? { flight_id: flightId } : {} }).then((r) => r.data),
     crewDisposition: (gid) => client.get(`/sim/${gid}/crew_disposition`).then((r) => r.data),
     openTime: (gid) => client.get(`/sim/${gid}/open_time`).then((r) => r.data),
     planDuty: (gid, crewIds, days, code) =>
