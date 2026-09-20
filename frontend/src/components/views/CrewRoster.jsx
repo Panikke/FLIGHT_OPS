@@ -291,9 +291,11 @@ export default function CrewRoster({ state, onChanged }) {
 
             {/* Header */}
             <div className="px-4 py-3 border-b border-white/10 flex items-center gap-4">
-                <div>
-                    <div className="label-key">CREW ROSTER LINE</div>
-                    <div className="font-azeret text-lg">ROSTER PLANNER · LHR BASE</div>
+                    <div>
+                        <div className="label-key">CREW ROSTER LINE</div>
+                    <div className="font-azeret text-lg">
+                        {state?.is_planner_mode ? "PLANNER MODE · 28-DAY CONTROL WINDOW" : "ROSTER PLANNER · LHR BASE"}
+                    </div>
                 </div>
                 <div className="flex-1" />
                 <div className="uppercase-wide t-sec">

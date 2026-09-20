@@ -64,7 +64,7 @@ function App() {
             const s = await api.newGame(scenario);
             setState(s);
             localStorage.setItem(STORAGE_KEY, s.id);
-            setView("roster");
+            setView(scenario === "planner_28" ? "calendar" : "roster");
         } finally {
             setLoading(false);
         }
@@ -299,6 +299,7 @@ function App() {
                             state={state}
                             onOpenIncidents={() => setView("incidents")}
                             onOpenAircraft={() => setView("aircraft")}
+                            onChanged={refresh}
                         />
                     )}
                     {showView === "roster" && (

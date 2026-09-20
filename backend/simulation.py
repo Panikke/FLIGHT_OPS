@@ -580,13 +580,15 @@ def _required_crew_for(ac_type: str, block_min: int) -> dict:
 
 def new_game(scenario: str = "free_play", seed: int | None = None) -> dict:
     """Create a fresh game state.
-    scenario: 'free_play' (open-ended) or 'survive_7' (7-day fixed-seed challenge)
+    scenario: 'free_play' (open-ended), 'survive_7' (7-day fixed-seed
+    challenge), or 'planner_28' (28-day pre-operations planning desk).
     seed: explicit override for the RNG, for deterministic tests. Real
     gameplay never passes this — free_play's OS-entropy reseed (a real
     player's game must not be reproducible/gameable) and survive_7's fixed
     leaderboard seed are both untouched when it's left as None.
     """
     is_challenge = scenario == "survive_7"
+    is_planner_mode = scenario == "planner_28"
     if seed is not None:
         random.seed(seed)
     elif is_challenge:
@@ -665,6 +667,11 @@ def new_game(scenario: str = "free_play", seed: int | None = None) -> dict:
         "outstation_crew": [],   # list of {crew_id, station, flight_id_to_return}
         # Scenario / challenge mode
         "is_challenge": is_challenge,
+        # Planner Mode deliberately opens before Day 1 with a full roster
+        # period visible.  The normal campaign keeps its compact rolling view
+        # once live operations begin.
+        "is_planner_mode": is_planner_mode,
+        "planning_horizon_days": 28 if is_planner_mode else None,
         "total_days": 7 if is_challenge else None,
         "campaign_complete": False,
         "final_grade": None,
@@ -1565,10 +1572,15 @@ def open_time(state: dict) -> list[dict]:
     return rows
 
 
-def crew_roster(state: dict, past_days: int = 5, future_days: int = 4) -> dict:
+def crew_roster(state: dict, past_days: int | None = None, future_days: int | None = None) -> dict:
     """Build the AerOPS-style crew calendar: one row per crew, one cell per day.
     Past cells come from the recorded duty_history, today is live, future cells
     show planned days off (anything else is open)."""
+    if past_days is None:
+        past_days = 0 if state.get("is_planner_mode") else 5
+    if future_days is None:
+        horizon = state.get("planning_horizon_days") or 5
+        future_days = max(0, horizon - 1) if state.get("is_planner_mode") else 4
     day_number = state.get("day_number", 1)
     days = list(range(day_number - past_days, day_number + future_days + 1))
     base_date = datetime.fromisoformat(state["day_start"]).date()

@@ -30,6 +30,15 @@ const SCENARIOS = [
         desc: "Fixed-seed challenge. Disruption escalates daily—storm midweek, AOG by day 7.",
         detail: "Final performance grade on exit. One seed, no restarts.",
     },
+    {
+        id: "planner_28",
+        label: "PLANNER MODE",
+        badge: "28-DAY ROSTER",
+        accent: "var(--status-nominal)",
+        accentBg: "rgba(61,220,151,0.07)",
+        desc: "Build the operating plan before day one: groups, leave, standby depth and fleet cover.",
+        detail: "A full 28-day roster window. Your choices become tomorrow's resilience.",
+    },
 ];
 
 function useReducedMotion() {

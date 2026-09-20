@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../../api";
+import { ReassignModal } from "./AircraftControl";
 
 const SEVERITY_TONE = {
     major: "t-crit",
@@ -200,7 +201,137 @@ function FlightWorkspace({ selected, onOpenIncidents, onOpenAircraft }) {
     );
 }
 
-export default function LiveOcc({ state, onOpenIncidents, onOpenAircraft }) {
+function DisruptionFocusDesk({ state, selected, onRecovered }) {
+    const [control, setControl] = useState(null);
+    const [reassign, setReassign] = useState(null);
+    const [error, setError] = useState(null);
+
+    useEffect(() => {
+        let cancelled = false;
+        api.aircraftControl(state.id)
+            .then((next) => {
+                if (!cancelled) {
+                    setControl(next);
+                    setError(null);
+                }
+            })
+            .catch(() => !cancelled && setError("Recovery feed unavailable."));
+        return () => { cancelled = true; };
+    }, [state.id, state.clock, state.incidents]);
+
+    if (!selected) {
+        return <div className="p-6 font-mono-jb text-xs t-muted">[WAIT] ISOLATING AFFECTED ROTATION…</div>;
+    }
+
+    const { flight, aircraft, crew, downstream, impact, incidents } = selected;
+    const rotation = control?.rotations?.find((r) => r.callsigns?.includes(flight.callsign));
+    const spares = (control?.fleet || []).filter((ac) => ac.spare && !ac.grounded && !ac.in_c_check);
+
+    return (
+        <div className="h-full overflow-auto bg-[#050505]" data-testid="occ-focus-desk">
+            <header className="px-6 py-4 border-b-2 border-[var(--status-critical)] bg-[var(--status-critical)]/[0.07] flex items-start gap-4">
+                <div className="w-2 self-stretch bg-[var(--status-critical)] shadow-[0_0_18px_var(--status-critical)]" />
+                <div>
+                    <div className="label-key t-crit">AOG RECOVERY DESK · NETWORK SUPPRESSED</div>
+                    <h2 className="font-azeret text-2xl mt-1">{aircraft.reg} / {flight.callsign}</h2>
+                    <p className="font-mono-jb text-xs t-sec mt-1">
+                        {flight.route} · {aircraft.type} · ESTIMATE {fmtEstimate(aircraft.maintenance_estimate)} · {impact.downstream_sectors} SECTORS AT RISK
+                    </p>
+                </div>
+                <div className="ml-auto text-right font-mono-jb text-[10px] t-warn">
+                    CLOCK CONTINUES<br />ONLY THIS ROTATION IS HELD
+                </div>
+            </header>
+
+            <div className="grid grid-cols-[minmax(0,1fr)_320px] gap-0 min-h-[calc(100%-86px)]">
+                <main className="p-6 border-r border-white/10 space-y-6">
+                    <section>
+                        <div className="label-key">DECISION CONTEXT</div>
+                        {incidents.map((incident) => (
+                            <div key={incident.id} className="mt-2 border-l-2 border-[var(--status-critical)] bg-white/[0.03] px-4 py-3 font-mono-jb text-xs t-sec">
+                                <span className="t-crit">{incident.type}</span> · {incident.description}
+                            </div>
+                        ))}
+                    </section>
+
+                    <section>
+                        <div className="label-key">AFFECTED TAIL ROTATION</div>
+                        <div className="mt-2 grid gap-2">
+                            {[flight, ...downstream].map((sector, index) => (
+                                <div key={sector.id} className={`grid grid-cols-[28px_92px_1fr_auto] gap-3 items-center border px-3 py-3 font-mono-jb text-xs ${index === 0 ? "border-[var(--status-critical)] bg-[var(--status-critical)]/[0.08]" : "border-white/10"}`}>
+                                    <span className={index === 0 ? "t-crit" : "t-muted"}>{String(index + 1).padStart(2, "0")}</span>
+                                    <span className="t-info">{sector.callsign}</span>
+                                    <span className="t-sec">{sector.route}</span>
+                                    <span className={sector.delay_min > 0 ? "t-warn" : "t-muted"}>{sector.delay_min > 0 ? `+${sector.delay_min}M` : "PENDING"}</span>
+                                </div>
+                            ))}
+                        </div>
+                    </section>
+
+                    <section>
+                        <div className="label-key">OPERATING CREW · DUTY HEADROOM</div>
+                        <div className="mt-2 grid grid-cols-2 gap-x-8 gap-y-2 font-mono-jb text-xs">
+                            {crew.map((member) => (
+                                <div key={member.id} className="flex gap-2 border-b border-white/[0.06] pb-2">
+                                    <span className="t-info">{member.rank}</span>
+                                    <span className="t-sec truncate">{member.name}</span>
+                                    <span className={member.duty_slack_min < 60 ? "t-warn ml-auto" : "t-muted ml-auto"}>{member.duty_slack_min ?? "—"}M</span>
+                                </div>
+                            ))}
+                        </div>
+                    </section>
+                </main>
+
+                <aside className="p-5 space-y-5 bg-black/30">
+                    <section>
+                        <div className="label-key">AVAILABLE SPARE AIRCRAFT</div>
+                        <div className="mt-2 space-y-2">
+                            {!control && <div className="font-mono-jb text-xs t-muted">CHECKING FLEET POSITION…</div>}
+                            {spares.map((ac) => (
+                                <div key={ac.reg} className="border border-[var(--status-nominal)]/40 px-3 py-2 font-mono-jb text-xs">
+                                    <div className="t-nominal">{ac.reg} · {ac.type}</div>
+                                    <div className="t-muted mt-1">{ac.location || "LHR"} · RESERVE / SERVICEABLE</div>
+                                </div>
+                            ))}
+                            {control && !spares.length && <div className="font-mono-jb text-xs t-warn">NO SERVICEABLE SPARES AT THIS TIME.</div>}
+                        </div>
+                    </section>
+
+                    <section className="border-t border-white/10 pt-5">
+                        <div className="label-key">RECOVERY ACTION</div>
+                        <p className="font-mono-jb text-xs t-sec mt-2 leading-relaxed">
+                            Test same-type spare, ferry and larger-aircraft cover. The recovery screen validates position, airport suitability, qualified crew, FTL and the commercial upgauge cost before dispatch.
+                        </p>
+                        {rotation ? (
+                            <button className="btn btn-primary w-full mt-4" onClick={() => setReassign(rotation)} data-testid="focus-open-recovery">
+                                ▸ PLAN TAIL RECOVERY
+                            </button>
+                        ) : (
+                            <div className="font-mono-jb text-xs t-warn mt-3">{error || "LOCATING ACTIVE ROTATION…"}</div>
+                        )}
+                    </section>
+                </aside>
+            </div>
+
+            {reassign && (
+                <ReassignModal
+                    state={state}
+                    rotation={reassign}
+                    fleet={control.fleet}
+                    minTurn={control.min_turnaround_min}
+                    hub={control.hub || "LHR"}
+                    onClose={() => setReassign(null)}
+                    onAssigned={async () => {
+                        setReassign(null);
+                        await onRecovered();
+                    }}
+                />
+            )}
+        </div>
+    );
+}
+
+export default function LiveOcc({ state, onOpenIncidents, onOpenAircraft, onChanged }) {
     const [focusFlightId, setFocusFlightId] = useState(null);
     const [workspace, setWorkspace] = useState(null);
     const [error, setError] = useState(false);
@@ -220,6 +351,14 @@ export default function LiveOcc({ state, onOpenIncidents, onOpenAircraft }) {
         };
     }, [state, focusFlightId]);
 
+    const criticalItem = workspace?.priority_queue?.find((item) => item.requires_aircraft_decision);
+    const criticalFlightId = criticalItem?.flight_id;
+    useEffect(() => {
+        if (criticalFlightId && focusFlightId !== criticalFlightId) {
+            setFocusFlightId(criticalFlightId);
+        }
+    }, [criticalFlightId, focusFlightId]);
+
     if (error) {
         return <div className="p-6 font-mono-jb text-xs t-crit">[SYS] LIVE OCC FEED UNAVAILABLE — RETRY AFTER BACKEND RECOVERS.</div>;
     }
@@ -228,6 +367,19 @@ export default function LiveOcc({ state, onOpenIncidents, onOpenAircraft }) {
     }
 
     const selectedFlightId = workspace.selected?.flight?.id;
+    if (criticalItem) {
+        return (
+            <DisruptionFocusDesk
+                state={state}
+                selected={workspace.selected}
+                onRecovered={async () => {
+                    await onChanged?.();
+                    const next = await api.occWorkspace(state.id, criticalItem.flight_id);
+                    setWorkspace(next);
+                }}
+            />
+        );
+    }
     return (
         <div className="h-full min-w-[980px] flex flex-col" data-testid="live-occ">
             <div className="px-4 py-3 border-b border-white/10 flex items-center gap-3">
