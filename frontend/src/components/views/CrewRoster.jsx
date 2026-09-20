@@ -91,17 +91,37 @@ export default function CrewRoster({ state, onChanged }) {
     // Rostering a base means moving groups of people. Doing it one cell at a
     // time is data entry, not planning.
     const [selected, setSelected] = useState(() => new Set());
+    const [selectionAnchor, setSelectionAnchor] = useState(null);
     const [selectedDays, setSelectedDays] = useState(() => new Set());
     const [bulkBusy, setBulkBusy] = useState(false);
     const [bulkNote, setBulkNote] = useState(null);
 
-    function toggleCrew(crewId) {
+    function toggleCrew(crewId, shiftKey = false) {
+        // Match the range-selection muscle memory of an actual rostering
+        // spreadsheet: select one crew member, then Shift-click another to
+        // include everybody displayed between them.  The current filter and
+        // sort order deliberately define the range, so controllers can first
+        // narrow to a fleet/rank/base cohort and select it in one gesture.
+        if (shiftKey && selectionAnchor) {
+            const first = rows.findIndex((crew) => crew.crew_id === selectionAnchor);
+            const last = rows.findIndex((crew) => crew.crew_id === crewId);
+            if (first !== -1 && last !== -1) {
+                const [from, to] = first < last ? [first, last] : [last, first];
+                setSelected((prev) => {
+                    const next = new Set(prev);
+                    rows.slice(from, to + 1).forEach((crew) => next.add(crew.crew_id));
+                    return next;
+                });
+                return;
+            }
+        }
         setSelected((prev) => {
             const next = new Set(prev);
             if (next.has(crewId)) next.delete(crewId);
             else next.add(crewId);
             return next;
         });
+        setSelectionAnchor(crewId);
     }
 
     function toggleDay(day) {
@@ -268,7 +288,7 @@ export default function CrewRoster({ state, onChanged }) {
                     ) : (
                         <span className="t-muted">
                             {selected.size === 0 && selectedDays.size === 0
-                                ? "① Tick crew on the left, then ② click the day columns you want to change."
+                                ? "① Tick crew on the left (Shift-click another name to select the range), then ② click the day columns you want to change."
                                 : selected.size === 0
                                 ? "① Now tick the crew on the left."
                                 : "② Now click one or more day columns in the header."}
@@ -347,7 +367,7 @@ export default function CrewRoster({ state, onChanged }) {
                             {c}
                         </span>
                     ))}
-                    <span className="t-sec">· CLICK A FUTURE CELL TO TOGGLE OFF</span>
+                    <span className="t-sec">· SHIFT-CLICK CREW TO SELECT A RANGE · CLICK A FUTURE CELL TO TOGGLE OFF</span>
                 </div>
             </div>
 
@@ -362,13 +382,14 @@ export default function CrewRoster({ state, onChanged }) {
                                     aria-label="Select all shown crew"
                                     data-testid="roster-select-all"
                                     checked={rows.length > 0 && rows.every((r) => selected.has(r.crew_id))}
-                                    onChange={(e) =>
+                                    onChange={(e) => {
+                                        setSelectionAnchor(null);
                                         setSelected(
                                             e.target.checked
                                                 ? new Set(rows.map((r) => r.crew_id))
                                                 : new Set()
-                                        )
-                                    }
+                                        );
+                                    }}
                                 />
                             </th>
                             <th className="text-left px-3 py-2 border-b border-white/10 sticky left-0 bg-[#050505] z-20">CREW</th>
@@ -443,7 +464,7 @@ export default function CrewRoster({ state, onChanged }) {
                                             aria-label={`Select ${c.crew_id} ${c.name}`}
                                             data-testid={`roster-select-${c.crew_id}`}
                                             checked={selected.has(c.crew_id)}
-                                            onChange={() => toggleCrew(c.crew_id)}
+                                            onChange={(e) => toggleCrew(c.crew_id, e.shiftKey)}
                                         />
                                     </td>
                                     <td className="px-3 py-1 sticky left-0 bg-[#050505] z-10 whitespace-nowrap">
