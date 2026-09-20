@@ -578,12 +578,18 @@ def _required_crew_for(ac_type: str, block_min: int) -> dict:
 
 # ------------------- Game state factory ------------------- #
 
-def new_game(scenario: str = "free_play") -> dict:
+def new_game(scenario: str = "free_play", seed: int | None = None) -> dict:
     """Create a fresh game state.
     scenario: 'free_play' (open-ended) or 'survive_7' (7-day fixed-seed challenge)
+    seed: explicit override for the RNG, for deterministic tests. Real
+    gameplay never passes this — free_play's OS-entropy reseed (a real
+    player's game must not be reproducible/gameable) and survive_7's fixed
+    leaderboard seed are both untouched when it's left as None.
     """
     is_challenge = scenario == "survive_7"
-    if is_challenge:
+    if seed is not None:
+        random.seed(seed)
+    elif is_challenge:
         # Fixed seed makes the challenge reproducible (and leaderboard-able)
         random.seed(20260514)
     else:

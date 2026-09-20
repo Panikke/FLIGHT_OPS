@@ -1,20 +1,47 @@
 """Iteration 5: Survive 7 + Bunk-based FDP extension tests."""
 import os
+import sys
+from pathlib import Path
+
 import requests
-import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import simulation as sim  # noqa: E402
+
 
 def _load_frontend_url():
-    p = "/app/frontend/.env"
-    if os.path.exists(p):
-        with open(p) as fh:
-            for ln in fh:
-                if ln.startswith("REACT_APP_BACKEND_URL="):
-                    return ln.split("=", 1)[1].strip()
-    return os.environ.get("REACT_APP_BACKEND_URL", "")
+    # Env var wins; otherwise read frontend/.env repo-relative first so the
+    # suite runs on a dev machine, falling back to /app for container deploys.
+    # (Same order as test_occ_backend.py / test_pairings.py / test_campaign.py.)
+    url = os.environ.get("REACT_APP_BACKEND_URL", "")
+    if url:
+        return url
+    candidates = [
+        os.path.join(os.path.dirname(__file__), "..", "..", "frontend", ".env"),
+        "/app/frontend/.env",
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            with open(p) as fh:
+                for ln in fh:
+                    if ln.startswith("REACT_APP_BACKEND_URL="):
+                        return ln.split("=", 1)[1].strip().strip('"')
+    return ""
 
 
 BASE_URL = _load_frontend_url().rstrip('/')
 API = f"{BASE_URL}/api"
+
+
+# free_play deliberately reseeds from OS entropy — a player's game must not be
+# reproducible — so whether the generated day contains a ULR (>540min block)
+# sector is luck. The bunk/augmentation tests below build their state in process
+# under this seed instead of rolling the dice over HTTP: it yields three ULR
+# sectors across both wide-body types (LHR-LAX and LHR-SIN on the B777, LHR-HKG
+# on the A350). No seed is plumbed through POST /api/sim/new on purpose — that
+# would let a player reroll a game.
+ULR_SEED = 4
 
 
 def _new(scenario=None):
@@ -27,10 +54,9 @@ def _new(scenario=None):
 # ---- Bunk + augmented crew ----
 class TestBunkFDP:
     def test_long_haul_ulr_requires_augmented_crew(self):
-        s = _new("free_play")
+        s = sim.new_game("free_play", seed=ULR_SEED)
         lh = [f for f in s["flights"] if f["block_min"] > 540]
-        if not lh:
-            pytest.skip("No ULR flight generated in this seed")
+        assert lh, f"seed {ULR_SEED} no longer generates a ULR sector"
         for f in lh:
             # A single Captain operates every sector; augmentation is carried
             # entirely by relief First Officers (see simulation._relief_pilots_for).
@@ -47,26 +73,29 @@ class TestBunkFDP:
             assert f["required_crew"]["FO"] == 1
 
     def test_precheck_message_mentions_18h_bunk_extension(self):
-        s = _new("free_play")
-        ulr = next((f for f in s["flights"] if f["block_min"] > 540), None)
-        if not ulr:
-            pytest.skip("No ULR in seed")
-        cp = next(c for c in s["crew"] if c["rank"] == "CP" and ulr["aircraft_type"] in c["qualifications"])
-        r = requests.post(f"{API}/sim/{s['id']}/check_assignment/{ulr['id']}",
-                          json={"crew_id": cp["id"]}, timeout=30)
-        assert r.status_code == 200
-        msgs = " ".join(w["message"] for w in r.json()["warnings"])
-        # An 18h cap is the basis on ULR; message may or may not be FDP_EXCEED
-        # depending on FDP usage, but the basis string is only used in the
-        # FDP_EXCEED message when triggered. Check the cap path via simulation.
-        from importlib import import_module
-        import sys
-        sys.path.insert(0, "/app/backend")
-        simmod = import_module("simulation")
-        cap, basis = simmod._fdp_cap_for_flight(ulr)
+        s = sim.new_game("free_play", seed=ULR_SEED)
+        ulr = next(f for f in s["flights"] if f["block_min"] > 540)
+        cap, basis = sim._fdp_cap_for_flight(ulr)
         assert cap == 18 * 60
         assert "Class 1 bunks" in basis
         assert ulr["aircraft_type"] in basis
+
+        # The cap only ever reaches the controller through the FDP_EXCEED
+        # message, and only when the projection actually busts it — so bust it.
+        # A Captain already 12h into an FDP cannot then take a 12h+ ULR sector
+        # on top of it, and the message has to say which cap it broke. Standby
+        # crew are skipped: home standby beyond the free hours cuts the cap
+        # below 18h (CS FTL.1.225), which is a different message.
+        cp = next(c for c in s["crew"]
+                  if c["rank"] == "CP"
+                  and ulr["aircraft_type"] in c["qualifications"]
+                  and c["status"] != "standby")
+        cp["fdp_used_min"] = 12 * 60
+        warnings = sim.check_assignment(s, ulr["id"], cp["id"])
+        msg = next(w["message"] for w in warnings if w["code"] == "FDP_EXCEED")
+        assert "18h FDP applicable" in msg
+        assert "Class 1 bunks" in msg
+        assert ulr["aircraft_type"] in msg
 
 
 # ---- Survive 7 scenario ----
@@ -104,9 +133,10 @@ class TestDifficultyCurve:
         import sys
         sys.path.insert(0, "/app/backend")
         import simulation as simmod
-        import random
-        # Build a survive_7 state in-memory and tick repeatedly
-        random.seed(1234)
+        # Build a survive_7 state in-memory and tick repeatedly. survive_7
+        # already reseeds internally to a fixed value for leaderboard
+        # reproducibility, so no explicit seed is needed (a prior
+        # random.seed(1234) here was dead code — new_game() overwrote it).
         state = simmod.new_game("survive_7")
         state["day_number"] = day
         state["phase"] = "OPS"
