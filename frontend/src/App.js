@@ -19,6 +19,7 @@ import useHotkeys from "./lib/useHotkeys";
 import { NAV } from "./components/Sidebar";
 import ProblemMonitor from "./components/ProblemMonitor";
 import CrewDisposition from "./components/views/CrewDisposition";
+import LiveOcc from "./components/views/LiveOcc";
 
 const STORAGE_KEY = "egw_occ_game_id";
 
@@ -63,7 +64,7 @@ function App() {
             const s = await api.newGame(scenario);
             setState(s);
             localStorage.setItem(STORAGE_KEY, s.id);
-            setView("roster");
+            setView(scenario === "planner_28" ? "calendar" : "roster");
         } finally {
             setLoading(false);
         }
@@ -75,26 +76,16 @@ function App() {
         try {
             const res = await api.tick(state.id, minutes);
             await refresh();
-            // A real OCC doesn't freeze the clock for every disruption — the
-            // sim keeps running; toasts + the INCIDENTS nav badge are the
-            // signal, not a forced pause/view-switch. Ignoring an incident has
-            // its own cost: it escalates (severity major, extra delay).
-            // The ONE exception is a grounded aircraft (major TECH): that's a
-            // real "the whole op stops until you fix this" decision, so the
-            // clock genuinely freezes (see is_clock_paused server-side) and
-            // we stop autoplay and steer the player to Aircraft Control.
-            if (res.paused) {
-                setPlaying(false);
-                setView("incidents");
-                setToast("⏸ OPERATION PAUSED — grounded aircraft needs a decision. Reassign via AIRCRAFT CONTROL or cancel the rotation.");
-                return;
-            }
             const parts = [];
             if (res.new_incidents?.length) parts.push(`${res.new_incidents.length} new incident(s)`);
             if (res.escalations?.length)
                 parts.push(`⚠ ${res.escalations.map((e) => `${e.incident_id} ESCALATED (${e.flight_callsign} +${e.added_min}m)`).join(", ")}`);
             if (res.compensation_events?.length)
                 parts.push(`💷 EU261 comp due: ${res.compensation_events.map((c) => `${c.callsign} $${c.amount_usd.toLocaleString()}`).join(", ")}`);
+            if (res.aog_holds?.length)
+                parts.push(`⛔ ${res.aog_holds.map((h) => `${h.callsign} HELD AOG`).join(", ")}`);
+            if (res.aircraft_released?.length)
+                parts.push(`✓ Maintenance released ${res.aircraft_released.join(", ")}`);
             if (parts.length) setToast(`▶ ${parts.join(" · ")} at ${res.clock.slice(11, 16)}Z`);
         } catch (e) {
             setPlaying(false);
@@ -104,13 +95,13 @@ function App() {
         }
     }
 
-    const pausedForAircraft = !!state?.incidents?.some(
+    const groundedDecisionCount = state?.incidents?.filter(
         (i) => i.status === "open" && i.requires_aircraft_decision
-    );
+    ).length || 0;
 
     // Auto-advance loop while playing
     useEffect(() => {
-        if (!playing || state?.phase !== "OPS" || pausedForAircraft) return;
+        if (!playing || state?.phase !== "OPS") return;
         const SPEED_MAP = {
             1: { interval: 1500, minutes: 5 },     // 5 sim min / 1.5s   = 200×
             2: { interval: 1200, minutes: 15 },    // 15 sim min / 1.2s  = 750×
@@ -130,7 +121,7 @@ function App() {
             clearInterval(t);
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [playing, speed, state?.phase, state?.id, pausedForAircraft]);
+    }, [playing, speed, state?.phase, state?.id]);
 
     // Keyboard accelerators. Real ops desks are driven from the keyboard;
     // every frequent action here was mouse-only. Inert while typing or while
@@ -138,7 +129,7 @@ function App() {
     const hotkeys = useMemo(
         () => ({
             " ": () => {
-                if (state?.phase === "OPS" && !pausedForAircraft) setPlaying((p) => !p);
+                if (state?.phase === "OPS") setPlaying((p) => !p);
             },
             "[": () => {
                 if (state?.phase === "OPS") tick(15);
@@ -149,7 +140,7 @@ function App() {
             ...Object.fromEntries(NAV.map((n) => [n.key, () => setView(n.id)])),
         }),
         // eslint-disable-next-line react-hooks/exhaustive-deps
-        [state?.phase, pausedForAircraft]
+        [state?.phase]
     );
     useHotkeys(hotkeys);
 
@@ -180,14 +171,14 @@ function App() {
         setPlaying(false);
         await api.restartDay(state.id);
         await refresh();
-        setView("incidents");
+        setView("live-occ");
         setToast("▶ DAY RESTARTED · clock back to 04:00Z");
     }
 
     async function startDay() {
         await api.startDay(state.id);
         await refresh();
-        setView("incidents");
+        setView("live-occ");
     }
 
     async function autoRoster() {
@@ -231,7 +222,7 @@ function App() {
         try {
             const s = await api.getState(id);
             setState(s);
-            setView(s.phase === "DEBRIEF" ? "debrief" : s.phase === "OPS" ? "incidents" : "roster");
+            setView(s.phase === "DEBRIEF" ? "debrief" : s.phase === "OPS" ? "live-occ" : "roster");
         } catch {
             localStorage.removeItem(STORAGE_KEY);
         }
@@ -286,7 +277,7 @@ function App() {
                 speed={speed}
                 onTogglePlay={() => setPlaying((p) => !p)}
                 onChangeSpeed={(s) => setSpeed(s)}
-                pausedForAircraft={pausedForAircraft}
+                groundedDecisionCount={groundedDecisionCount}
             />
             <div className="flex-1 flex overflow-hidden">
                 <Sidebar
@@ -303,6 +294,14 @@ function App() {
                     )}
                     {state.phase === "OPS" && <CascadeStrip state={state} />}
                     <div className="flex-1 overflow-hidden">
+                    {showView === "live-occ" && state.phase === "OPS" && (
+                        <LiveOcc
+                            state={state}
+                            onOpenIncidents={() => setView("incidents")}
+                            onOpenAircraft={() => setView("aircraft")}
+                            onChanged={refresh}
+                        />
+                    )}
                     {showView === "roster" && (
                         <RosterBoard
                             state={state}

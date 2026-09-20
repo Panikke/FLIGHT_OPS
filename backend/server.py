@@ -141,6 +141,13 @@ async def irregularities(game_id: str):
     }
 
 
+@api_router.get("/sim/{game_id}/occ")
+async def occ_workspace(game_id: str, flight_id: str | None = None):
+    """LIVE OCC common operating picture, optionally focused on one flight."""
+    state = await _load(game_id)
+    return sim.operational_workspace(state, focus_flight_id=flight_id)
+
+
 @api_router.post("/sim/{game_id}/plan_duty")
 async def plan_duty(game_id: str, body: PlanDutyReq):
     """Write a planned duty across any number of crew and days at once."""

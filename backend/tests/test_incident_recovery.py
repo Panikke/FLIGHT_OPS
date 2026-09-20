@@ -56,11 +56,11 @@ def test_options_carry_feasibility_and_dynamic_costs():
             assert o["reason"]
 
 
-def test_major_tech_is_cancel_only_and_pauses_the_clock():
+def test_major_tech_is_cancel_only_but_the_clock_keeps_running():
     # A grounded (major) tech defect isn't MEL-deferrable and can't just be
     # held for — the only queue-resolvable option is cancel; fixing it any
-    # other way means going to Aircraft Control, and the whole clock is
-    # frozen until the player does one or the other.
+    # other way means going to Aircraft Control. It must not freeze every
+    # other aircraft in the operation, though.
     state = _fresh_ops_state()
     flight = _staffed_flight(state)
     opts = sim._recovery_options_for(state, flight, "TECH", "major")
@@ -69,8 +69,10 @@ def test_major_tech_is_cancel_only_and_pauses_the_clock():
     inc = _make_incident(state, flight, "TECH", "major")
     inc["requires_aircraft_decision"] = True
     assert sim.is_clock_paused(state) is True
+    before = state["clock"]
     res = sim.tick(state)
-    assert res.get("paused") is True
+    assert "paused" not in res
+    assert state["clock"] != before
 
     res = sim.resolve_incident(state, inc["id"], "mel_defer")
     assert res["ok"] is False

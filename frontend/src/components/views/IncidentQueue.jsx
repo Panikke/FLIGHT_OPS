@@ -65,13 +65,13 @@ export default function IncidentQueue({ state, onResolve, onAskAdvisor, onOpenAi
             {blocking.length > 0 && (
                 <div
                     className="px-4 py-3 border-b border-[var(--status-critical)] bg-[var(--status-critical)]/10 flex items-center gap-3 flex-wrap"
-                    data-testid="clock-paused-banner"
+                    data-testid="aog-pressure-banner"
                 >
-                    <span className="badge t-crit">⛔ CLOCK FROZEN</span>
+                    <span className="badge t-crit">⛔ CLOCK RUNNING · AOG PRESSURE</span>
                     <span className="text-sm">
                         {blocking.length} grounded aircraft awaiting a decision — reassign a real tail via
-                        Aircraft Control, or cancel the rotation below. The whole operation is on hold until
-                        this is resolved.
+                        Aircraft Control, cancel the rotation, or accept delay while Maintenance works. Other
+                        rotations continue and their downstream exposure remains live.
                     </span>
                     <button className="btn btn-primary ml-auto" onClick={onOpenAircraftControl}>
                         ▸ OPEN AIRCRAFT CONTROL
