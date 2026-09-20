@@ -41,7 +41,18 @@ function App() {
         const id = localStorage.getItem(STORAGE_KEY);
         if (id) {
             api.getState(id)
-                .then((s) => setState(s))
+                .then((s) => {
+                    setState(s);
+                    setView(
+                        s.phase === "DEBRIEF"
+                            ? "debrief"
+                            : s.phase === "OPS"
+                            ? "live-occ"
+                            : s.is_planner_mode
+                            ? "calendar"
+                            : "roster"
+                    );
+                })
                 .catch(() => localStorage.removeItem(STORAGE_KEY));
         }
     }, []);
