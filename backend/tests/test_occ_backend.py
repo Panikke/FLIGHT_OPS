@@ -4,6 +4,9 @@ import time
 import pytest
 import requests
 
+
+pytestmark = pytest.mark.integration
+
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "").rstrip("/")
 if not BASE_URL:
     # fallback - read frontend .env (repo-relative; /app for container deploys)

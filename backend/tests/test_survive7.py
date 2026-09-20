@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import requests
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -64,6 +65,7 @@ class TestBunkFDP:
             assert f["required_crew"]["FO"] >= 2, f
             assert f["aircraft_type"] in ("A350", "B777")
 
+    @pytest.mark.integration
     def test_short_haul_unaugmented(self):
         s = _new("free_play")
         sh = [f for f in s["flights"] if f["aircraft_type"] == "A320"]
@@ -99,6 +101,7 @@ class TestBunkFDP:
 
 
 # ---- Survive 7 scenario ----
+@pytest.mark.integration
 class TestSurvive7:
     def test_new_game_challenge_metadata(self):
         s = _new("survive_7")
@@ -164,6 +167,7 @@ class TestDifficultyCurve:
 
 
 # ---- Campaign finalization ----
+@pytest.mark.integration
 class TestCampaignFinalize:
     def test_seven_day_full_loop_via_api(self):
         s = _new("survive_7")

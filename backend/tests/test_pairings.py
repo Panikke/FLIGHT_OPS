@@ -3,6 +3,9 @@ import os
 import pytest
 import requests
 
+
+pytestmark = pytest.mark.integration
+
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "").rstrip("/")
 if not BASE_URL:
     _env = os.path.join(os.path.dirname(__file__), "..", "..", "frontend", ".env")
