@@ -262,6 +262,7 @@ export default function CrewRoster({ state, onChanged }) {
                     {selected.size > 0 && selectedDays.size > 0 ? (
                         <>
                             {[
+                                ["FLT", "FLT DUTY"],
                                 ["OFF", "DAY OFF"],
                                 ["SBY_APT", "AIRPORT STANDBY"],
                                 ["SBY_HOME", "HOME STANDBY"],
@@ -274,7 +275,9 @@ export default function CrewRoster({ state, onChanged }) {
                                     onClick={() => applyBulk(code)}
                                     data-testid={`bulk-${code}`}
                                     title={
-                                        code === "SBY_APT"
+                                        code === "FLT"
+                                            ? "Retain for flight duty; route assignment remains subject to qualification and FTL checks"
+                                            : code === "SBY_APT"
                                             ? "30min to report, but their duty clock is already running"
                                             : code === "SBY_HOME"
                                             ? "90min to report, fresh, erodes FDP past 6h on standby"

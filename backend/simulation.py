@@ -1612,7 +1612,7 @@ def crew_roster(state: dict, past_days: int | None = None, future_days: int | No
                 cells.append({
                     "day": d,
                     "code": ("OFF" if d in planned
-                             else {"SBY_APT": "SBY-A", "SBY_HOME": "SBY-H"}.get(planned_code)),
+                             else {"FLT": "FLT", "SBY_APT": "SBY-A", "SBY_HOME": "SBY-H"}.get(planned_code)),
                     "rel": "future",
                     "planned_off": d in planned,
                     "planned_duty": planned_code,
@@ -1647,6 +1647,7 @@ def crew_roster(state: dict, past_days: int | None = None, future_days: int | No
 # the planner could write, which left the standby bank — the thing that decides
 # whether tomorrow's sickness is survivable — entirely to a random draw.
 PLANNABLE_DUTIES = {
+    "FLT": "Flight duty — retain for an assigned flight; assignment still requires qualification and FTL clearance",
     "OFF": "Day off (free of duty)",
     "SBY_APT": "Airport standby — 30min to report, but the duty clock is running",
     "SBY_HOME": "Home standby — 90min to report, fresh, erodes FDP past 6h",
@@ -1719,6 +1720,14 @@ def _apply_planned_duty_now(state: dict, crew: dict, code: str) -> None:
         crew["status"] = "standby"
         crew["standby_type"] = STANDBY_AIRPORT if code == "SBY_APT" else STANDBY_HOME
         crew["standby_elapsed_hr"] = 0.0
+    elif code == "FLT":
+        # FLT is an operating-duty intention, not a fictional assignment to a
+        # route.  The normal roster/assignment flow still determines the
+        # specific sector and runs qualification/FTL checks.  It does, however,
+        # release a crew member from an existing OFF or standby plan today.
+        if crew["status"] in ("off", "standby"):
+            crew["status"] = "available"
+            crew["standby_type"] = None
 
 
 def set_day_off(state: dict, crew_id: str, day: int, off: bool = True) -> dict:
