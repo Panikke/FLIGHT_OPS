@@ -458,16 +458,29 @@ export default function CrewRoster({ state, onChanged }) {
                                     }`}
                                     data-testid={`roster-row-${c.crew_id}`}
                                 >
-                                    <td className="px-2 py-1 sticky left-0 bg-[#050505] z-10">
+                                    <td
+                                        className="px-2 py-1 sticky left-0 bg-[#050505] z-10 cursor-pointer"
+                                        onClick={(e) => {
+                                            // React's checkbox change event does not consistently
+                                            // retain modifier keys. Read Shift from the click itself.
+                                            e.preventDefault();
+                                            toggleCrew(c.crew_id, e.shiftKey);
+                                        }}
+                                    >
                                         <input
                                             type="checkbox"
                                             aria-label={`Select ${c.crew_id} ${c.name}`}
                                             data-testid={`roster-select-${c.crew_id}`}
                                             checked={selected.has(c.crew_id)}
-                                            onChange={(e) => toggleCrew(c.crew_id, e.shiftKey)}
+                                            readOnly
+                                            className="pointer-events-none"
                                         />
                                     </td>
-                                    <td className="px-3 py-1 sticky left-0 bg-[#050505] z-10 whitespace-nowrap">
+                                    <td
+                                        className="px-3 py-1 sticky left-0 bg-[#050505] z-10 whitespace-nowrap cursor-pointer"
+                                        onClick={(e) => toggleCrew(c.crew_id, e.shiftKey)}
+                                        title="Click to select crew; Shift-click another name to select the range"
+                                    >
                                         <span className="t-info">{c.crew_id}</span>{" "}
                                         <span className="t-sec">{c.name}</span>
                                     </td>
