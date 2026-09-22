@@ -20,6 +20,7 @@ import { NAV } from "./components/Sidebar";
 import ProblemMonitor from "./components/ProblemMonitor";
 import CrewDisposition from "./components/views/CrewDisposition";
 import LiveOcc from "./components/views/LiveOcc";
+import FlightAssignmentDesk from "./components/views/FlightAssignmentDesk";
 
 const STORAGE_KEY = "egw_occ_game_id";
 
@@ -320,6 +321,9 @@ function App() {
                             onStartDay={startDay}
                             onAutoRoster={autoRoster}
                         />
+                    )}
+                    {showView === "pairing-desk" && (
+                        <FlightAssignmentDesk state={state} onChanged={refresh} onStartDay={startDay} />
                     )}
                     {showView === "aircraft" && <AircraftControl state={state} onChanged={refresh} />}
                     {showView === "timeline" && <FlightTimeline state={state} />}

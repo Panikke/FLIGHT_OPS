@@ -3,6 +3,7 @@ import React from "react";
 export const NAV = [
     { id: "live-occ", label: "LIVE OCC", key: "0" },
     { id: "roster", label: "ROSTER", key: "1" },
+    { id: "pairing-desk", label: "FLIGHT ASSIGN", key: "P" },
     { id: "aircraft", label: "AIRCRAFT", key: "2" },
     { id: "timeline", label: "TIMELINE", key: "3" },
     { id: "incidents", label: "INCIDENTS", key: "4" },
