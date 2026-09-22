@@ -123,6 +123,8 @@ export default function FlightAssignmentDesk({ state, onChanged, onStartDay }) {
 
     const completePairings = pairings.filter((pairing) => pairing.crewIds.length >= pairing.requiredCount).length;
     const allComplete = completePairings === pairings.length;
+    const isLongHaul = selectedPairing.primary.block_min > 360;
+    const shortHaulNightStop = !isLongHaul && selectedPairing.flights[selectedPairing.flights.length - 1].destination !== "LHR";
 
     if (!selectedPairing) {
         return <div className="p-5 font-mono-jb t-muted">No released flights are available for assignment.</div>;
@@ -168,6 +170,9 @@ export default function FlightAssignmentDesk({ state, onChanged, onStartDay }) {
                         <div className="label-key">SELECTED PAIRING · SAME CREW OPERATES ALL SECTORS</div>
                         <div className="font-azeret text-xl mt-1">{selectedPairing.flights.map((flight) => `${flight.callsign} ${flight.origin} → ${flight.destination}`).join("  ·  ")}</div>
                         <div className="font-mono-jb text-xs t-sec mt-2">{selectedPairing.primary.aircraft_type} {selectedPairing.primary.aircraft_reg} · STD {clock(selectedPairing.primary.std)}Z · {selectedPairing.flights.length} sector{selectedPairing.flights.length === 1 ? "" : "s"}</div>
+                        <div className={`uppercase-wide mt-2 ${isLongHaul || shortHaulNightStop ? "t-warn" : "t-nominal"}`} data-testid="pairing-overnight-status">
+                            {isLongHaul ? `LONG-HAUL · NIGHT-STOP ${selectedPairing.primary.destination} · RETURN NEXT DAY` : shortHaulNightStop ? `SHORT-HAUL · NIGHT-STOP ${selectedPairing.flights[selectedPairing.flights.length - 1].destination}` : "SHORT-HAUL · RETURNS TO LHR SAME DAY"}
+                        </div>
                     </div>
                     <div className="p-5 border-b border-white/10">
                         <div className="label-key mb-3">CREW COVERAGE · CLICK A ROLE TO FILL ITS NEXT SLOT</div>

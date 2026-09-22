@@ -42,6 +42,11 @@ export const api = {
         client
             .post(`/sim/${gid}/plan_duty`, { crew_ids: crewIds, days, code })
             .then((r) => r.data),
+    crewGroups: (gid) => client.get(`/sim/${gid}/crew_groups`).then((r) => r.data),
+    saveCrewGroup: (gid, name, crewIds, operation) =>
+        client.post(`/sim/${gid}/crew_groups`, { name, crew_ids: crewIds, operation }).then((r) => r.data),
+    deleteCrewGroup: (gid, groupId) =>
+        client.delete(`/sim/${gid}/crew_groups/${groupId}`).then((r) => r.data),
     disposeCrew: (gid, crewId, action) =>
         client.post(`/sim/${gid}/crew/${crewId}/dispose`, { action }).then((r) => r.data),
     previewDispose: (gid, crewId, action) =>

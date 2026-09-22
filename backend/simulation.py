@@ -1655,6 +1655,49 @@ PLANNABLE_DUTIES = {
 }
 
 
+def crew_groups(state: dict) -> list[dict]:
+    """Return the controller's saved planning groups for this campaign.
+
+    Groups deliberately store crew IDs, not copies of people: qualifications,
+    fatigue and availability must always be read live when a group is used.
+    """
+    return state.setdefault("crew_groups", [])
+
+
+def save_crew_group(state: dict, name: str, crew_ids: list[str], operation: str = "SHORT_HAUL") -> dict:
+    """Save (or replace) a named, campaign-persistent crew planning group."""
+    clean_name = " ".join(name.split())[:40]
+    known_ids = {crew["id"] for crew in state["crew"]}
+    members = sorted({crew_id for crew_id in crew_ids if crew_id in known_ids})
+    if not clean_name:
+        return {"ok": False, "error": "group_name_required"}
+    if not members:
+        return {"ok": False, "error": "group_requires_crew"}
+    if operation not in ("SHORT_HAUL", "LONG_HAUL"):
+        return {"ok": False, "error": "unknown_operation"}
+
+    groups = crew_groups(state)
+    group = {
+        "id": clean_name.lower().replace(" ", "-")[:40],
+        "name": clean_name,
+        "crew_ids": members,
+        "operation": operation,
+    }
+    existing = next((index for index, item in enumerate(groups) if item["id"] == group["id"]), None)
+    if existing is None:
+        groups.append(group)
+    else:
+        groups[existing] = group
+    return {"ok": True, "group": group, "replaced": existing is not None}
+
+
+def delete_crew_group(state: dict, group_id: str) -> dict:
+    groups = crew_groups(state)
+    before = len(groups)
+    groups[:] = [group for group in groups if group["id"] != group_id]
+    return {"ok": len(groups) != before, "group_id": group_id}
+
+
 def plan_duty(state: dict, crew_ids: list[str], days: list[int], code: str) -> dict:
     """Write a planned duty onto one or more crew across one or more days.
 
