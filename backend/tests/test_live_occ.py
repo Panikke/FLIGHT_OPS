@@ -73,6 +73,12 @@ def test_operational_workspace_prioritises_aog_and_exposes_tail_impact():
     workspace = sim.operational_workspace(state, minor_flight["id"])
 
     assert workspace["priority_queue"][0]["incident_id"] == "INC-AOG"
+    expected_downstream = [f for f in state["flights"]
+                           if f["aircraft_reg"] == aog_flight["aircraft_reg"]
+                           and f["std"] > aog_flight["std"]
+                           and f["status"] in sim._AC_ACTIVE_STATUSES]
+    assert workspace["priority_queue"][0]["downstream_sectors"] == len(expected_downstream)
+    assert workspace["priority_queue"][0]["active_delay_min"] == 40
     assert workspace["selected"]["flight"]["id"] == minor_flight["id"]
     assert workspace["selected"]["aircraft"]["reg"] == minor_flight["aircraft_reg"]
     assert any(

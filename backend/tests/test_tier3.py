@@ -228,6 +228,32 @@ def test_positioning_moves_the_crew_and_charges_the_duty():
     assert "CP1" in stranded["assigned_crew_ids"]
 
 
+def test_positioning_rechecks_connection_before_charging():
+    carrier = _flight("EGW200", "G-EAGB", "A320", "10:00", 90, "P2",
+                      origin="LHR", destination="MAD")
+    stranded = _flight("EGW300", "G-EAGA", "A320", "16:00", 90, "P3",
+                       origin="MAD", destination="LHR")
+    state = _state([carrier, stranded], crew=[_crew("CP1", "CP", "Larsen")])
+    incident = {
+        "id": "INC-STALE", "type": "CREW_SICK", "severity": "minor",
+        "flight_id": stranded["id"], "flight_callsign": "EGW300", "status": "open",
+        "resolution": None, "raised_at": state["clock"], "escalated": False,
+        "options": sim._recovery_options_for(state, stranded, "CREW_SICK", "minor"),
+    }
+    state["incidents"].append(incident)
+    assert next(o for o in incident["options"] if o["action"] == "deadhead")["feasible"]
+
+    carrier["status"] = "cancelled"
+    cost_before = state["kpis"]["cost_usd"]
+    result = sim.resolve_incident(state, incident["id"], "deadhead")
+
+    assert result["ok"] is False
+    assert incident["status"] == "open"
+    assert state["kpis"]["cost_usd"] == cost_before
+    assert stranded["delay_min"] == 0
+    assert not state["decisions_log"]
+
+
 def test_a_positioned_crew_is_then_in_the_right_place():
     carrier = _flight("EGW200", "G-EAGB", "A320", "10:00", 90, "P2",
                       origin="LHR", destination="MAD")

@@ -43,6 +43,7 @@ export default function Sidebar({ active, onSelect, state, openIncidentCount, ro
                             key={n.id}
                             data-testid={`nav-${n.id}`}
                             onClick={() => onSelect(n.id)}
+                            aria-current={isActive ? "page" : undefined}
                             className={`w-full text-left px-4 py-3 border-b border-white/5 font-mono-jb text-xs tracking-widest uppercase flex items-center justify-between ${
                                 isActive
                                     ? "bg-white/5 t-info border-l-2 border-l-[var(--status-info)]"

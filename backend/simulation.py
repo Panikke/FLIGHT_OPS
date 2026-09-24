@@ -4418,6 +4418,7 @@ def resolve_incident(state: dict, incident_id: str, action: str) -> dict:
     # options were generated, so feasibility is re-checked live. On failure the
     # incident stays open and nothing is paid.
     replacement = None
+    deadhead_preview = None
     if flight:
         if action == "callout_standby":
             replacement = _find_recovery_crew(state, flight, ("standby",))
@@ -4431,6 +4432,18 @@ def resolve_incident(state: dict, incident_id: str, action: str) -> dict:
                 return {"ok": False, "incident": inc,
                         "reason": chosen.get("reason") or
                         f"No legal available crew rated {flight['required_crew']['type_qual']}."}
+        elif action == "deadhead":
+            if chosen.get("feasible") is False:
+                return {"ok": False, "incident": inc,
+                        "reason": chosen.get("reason") or "Option not feasible."}
+            deadhead_preview = preview_deadhead(state, flight["id"])
+            if (deadhead_preview.get("has_critical")
+                    or not deadhead_preview.get("plan")
+                    or not deadhead_preview.get("crew")):
+                warnings = deadhead_preview.get("warnings") or []
+                return {"ok": False, "incident": inc,
+                        "reason": (warnings[0]["message"] if warnings else
+                                   "No legal positioning sector is currently available.")}
         elif chosen.get("feasible") is False:
             return {"ok": False, "incident": inc,
                     "reason": chosen.get("reason") or "Option not feasible."}
@@ -4540,32 +4553,26 @@ def resolve_incident(state: dict, incident_id: str, action: str) -> dict:
         elif action == "warn_crew":
             pass
         elif action == "deadhead":
-            pv = preview_deadhead(state, flight["id"])
-            plan, dh_crew = pv.get("plan"), pv.get("crew")
-            if plan and dh_crew:
-                crew_obj = next(c for c in state["crew"] if c["id"] == dh_crew["id"])
-                crew_obj.setdefault("positioning", []).append(plan)
-                # ORO.FTL.215: positioning counts as duty and as FDP, but it is
-                # NOT a sector — it does not push the crew down the FDP table.
-                crew_obj["fdp_used_min"] = crew_obj.get("fdp_used_min", 0) + plan["block_min"]
-                crew_obj["duty_7d_hr"] = round(
-                    crew_obj.get("duty_7d_hr", 0) + plan["block_min"] / 60, 2)
-                # They arrive when they arrive; the duty cannot start before.
-                arrives = datetime.fromisoformat(plan["arrives"])
-                report_by = arrives + timedelta(minutes=DEADHEAD_REPORT_BUFFER_MIN)
-                std = datetime.fromisoformat(flight["std"]) + timedelta(
-                    minutes=flight.get("delay_min", 0))
-                if report_by > std:
-                    flight["delay_min"] += int((report_by - std).total_seconds() // 60)
-                    flight["status"] = "delayed"
-                assign_crew(state, flight["id"], crew_obj["id"], force=True)
-                crew_obj["status"] = "on_duty"
-                inc["positioned_crew_id"] = crew_obj["id"]
-                inc["positioning_plan"] = plan
-            else:
-                # Nothing connects — the option should not have been offered,
-                # but never silently succeed if it was.
-                flight["delay_min"] += 45
+            plan, dh_crew = deadhead_preview["plan"], deadhead_preview["crew"]
+            crew_obj = next(c for c in state["crew"] if c["id"] == dh_crew["id"])
+            crew_obj.setdefault("positioning", []).append(plan)
+            # ORO.FTL.215: positioning counts as duty and as FDP, but it is
+            # NOT a sector — it does not push the crew down the FDP table.
+            crew_obj["fdp_used_min"] = crew_obj.get("fdp_used_min", 0) + plan["block_min"]
+            crew_obj["duty_7d_hr"] = round(
+                crew_obj.get("duty_7d_hr", 0) + plan["block_min"] / 60, 2)
+            # They arrive when they arrive; the duty cannot start before.
+            arrives = datetime.fromisoformat(plan["arrives"])
+            report_by = arrives + timedelta(minutes=DEADHEAD_REPORT_BUFFER_MIN)
+            std = datetime.fromisoformat(flight["std"]) + timedelta(
+                minutes=flight.get("delay_min", 0))
+            if report_by > std:
+                flight["delay_min"] += int((report_by - std).total_seconds() // 60)
+                flight["status"] = "delayed"
+            assign_crew(state, flight["id"], crew_obj["id"], force=True)
+            crew_obj["status"] = "on_duty"
+            inc["positioned_crew_id"] = crew_obj["id"]
+            inc["positioning_plan"] = plan
 
         if pax_disrupt and action != "cancel":
             state["kpis"]["pax_disrupted"] += int(flight.get("pax_count", 0) * 0.4)
@@ -5381,6 +5388,13 @@ def operational_workspace(state: dict, focus_flight_id: str | None = None) -> di
     for position, incident in enumerate(live_incidents, start=1):
         flight = by_flight.get(incident.get("flight_id"))
         bucket, due_in, _raised = _occ_incident_priority(state, incident)
+        downstream = (
+            [f for f in state.get("flights", [])
+             if f.get("aircraft_reg") == flight.get("aircraft_reg")
+             and f.get("status") in _AC_ACTIVE_STATUSES
+             and f["std"] > flight["std"]]
+            if flight else []
+        )
         priority_queue.append({
             "priority": position,
             "incident_id": incident["id"],
@@ -5395,6 +5409,9 @@ def operational_workspace(state: dict, focus_flight_id: str | None = None) -> di
             "description": incident["description"],
             "reported_by": incident.get("reported_by"),
             "priority_band": ("grounded" if bucket == 0 else "major" if bucket == 1 else "routine"),
+            "downstream_sectors": len(downstream),
+            "active_delay_min": (flight.get("delay_min", 0) if flight else 0)
+                                + sum(f.get("delay_min", 0) for f in downstream),
         })
 
     focus = by_flight.get(focus_flight_id) if focus_flight_id else None

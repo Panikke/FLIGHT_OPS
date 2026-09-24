@@ -34,18 +34,22 @@ function PriorityQueue({ items, selectedFlightId, onSelect }) {
                     <button
                         key={item.incident_id}
                         onClick={() => onSelect(item.flight_id)}
+                        aria-pressed={selectedFlightId === item.flight_id}
                         className={`w-full text-left px-4 py-3 border-b border-white/[0.06] hover:bg-white/[0.03] ${
                             selectedFlightId === item.flight_id ? "bg-white/[0.05] border-l-2 border-l-[var(--status-info)]" : ""
                         }`}
                         data-testid={`occ-priority-${item.incident_id}`}
                     >
                         <div className="flex items-center gap-2 font-mono-jb text-[10px]">
-                            <span className="t-muted">P{item.priority}</span>
+                            <span className="t-muted">P{item.priority} · {item.priority_band?.toUpperCase()}</span>
                             <span className={SEVERITY_TONE[item.severity] || "t-sec"}>{item.type}</span>
                             {item.requires_aircraft_decision && <span className="badge t-crit">AOG</span>}
                         </div>
                         <div className="font-azeret text-sm mt-1 t-info">{item.callsign}</div>
                         <div className="font-mono-jb text-[10px] t-sec mt-0.5">{item.route}</div>
+                        <div className="font-mono-jb text-[10px] t-warn mt-1">
+                            {item.downstream_sectors} DOWNSTREAM · {item.active_delay_min}M ACTIVE DELAY
+                        </div>
                         <div className="font-mono-jb text-[10px] t-muted mt-1 line-clamp-2">{item.description}</div>
                         {!item.escalated && item.escalates_in_min !== null && (
                             <div className={`uppercase-wide mt-1 ${item.escalates_in_min <= 10 ? "t-crit" : "t-warn"}`}>
@@ -88,6 +92,7 @@ function Network({ rows, selectedFlightId, onSelect }) {
                                 <button
                                     key={flight.id}
                                     onClick={() => onSelect(flight.id)}
+                                    aria-pressed={selectedFlightId === flight.id}
                                     className={`min-w-[126px] text-left border-l-2 px-2 py-1.5 font-mono-jb text-[10px] hover:bg-white/[0.06] ${flightTone(flight)} ${
                                         selectedFlightId === flight.id ? "outline outline-1 outline-[var(--status-info)]" : ""
                                     }`}
@@ -201,7 +206,7 @@ function FlightWorkspace({ selected, onOpenIncidents, onOpenAircraft }) {
     );
 }
 
-function DisruptionFocusDesk({ state, selected, onRecovered }) {
+function DisruptionFocusDesk({ state, selected, onRecovered, onViewNetwork }) {
     const [control, setControl] = useState(null);
     const [reassign, setReassign] = useState(null);
     const [error, setError] = useState(null);
@@ -240,6 +245,9 @@ function DisruptionFocusDesk({ state, selected, onRecovered }) {
                 </div>
                 <div className="ml-auto text-right font-mono-jb text-[10px] t-warn">
                     CLOCK CONTINUES<br />ONLY THIS ROTATION IS HELD
+                    <button className="btn mt-2" onClick={onViewNetwork}>
+                        VIEW NETWORK
+                    </button>
                 </div>
             </header>
 
@@ -335,6 +343,7 @@ export default function LiveOcc({ state, onOpenIncidents, onOpenAircraft, onChan
     const [focusFlightId, setFocusFlightId] = useState(null);
     const [workspace, setWorkspace] = useState(null);
     const [error, setError] = useState(false);
+    const [showNetworkDuringAog, setShowNetworkDuringAog] = useState(false);
 
     useEffect(() => {
         let cancelled = false;
@@ -354,10 +363,13 @@ export default function LiveOcc({ state, onOpenIncidents, onOpenAircraft, onChan
     const criticalItem = workspace?.priority_queue?.find((item) => item.requires_aircraft_decision);
     const criticalFlightId = criticalItem?.flight_id;
     useEffect(() => {
-        if (criticalFlightId && focusFlightId !== criticalFlightId) {
+        setShowNetworkDuringAog(false);
+    }, [criticalFlightId]);
+    useEffect(() => {
+        if (criticalFlightId && !showNetworkDuringAog && focusFlightId !== criticalFlightId) {
             setFocusFlightId(criticalFlightId);
         }
-    }, [criticalFlightId, focusFlightId]);
+    }, [criticalFlightId, focusFlightId, showNetworkDuringAog]);
 
     if (error) {
         return <div className="p-6 font-mono-jb text-xs t-crit">[SYS] LIVE OCC FEED UNAVAILABLE — RETRY AFTER BACKEND RECOVERS.</div>;
@@ -367,11 +379,15 @@ export default function LiveOcc({ state, onOpenIncidents, onOpenAircraft, onChan
     }
 
     const selectedFlightId = workspace.selected?.flight?.id;
-    if (criticalItem) {
+    if (criticalItem && !showNetworkDuringAog) {
+        if (selectedFlightId !== criticalFlightId) {
+            return <div className="p-6 font-mono-jb text-xs t-muted">[WAIT] ISOLATING AFFECTED ROTATION…</div>;
+        }
         return (
             <DisruptionFocusDesk
                 state={state}
                 selected={workspace.selected}
+                onViewNetwork={() => setShowNetworkDuringAog(true)}
                 onRecovered={async () => {
                     await onChanged?.();
                     const next = await api.occWorkspace(state.id, criticalItem.flight_id);
@@ -382,6 +398,15 @@ export default function LiveOcc({ state, onOpenIncidents, onOpenAircraft, onChan
     }
     return (
         <div className="h-full min-w-[980px] flex flex-col" data-testid="live-occ">
+            {criticalItem && (
+                <div className="px-4 py-2 border-b border-[var(--status-critical)] bg-[var(--status-critical)]/10 flex items-center gap-3 font-mono-jb text-xs" role="alert">
+                    <span className="t-crit">AOG · {criticalItem.callsign} · CLOCK RUNNING</span>
+                    <button className="btn btn-danger ml-auto" onClick={() => {
+                        setFocusFlightId(criticalFlightId);
+                        setShowNetworkDuringAog(false);
+                    }}>RETURN TO RECOVERY DESK</button>
+                </div>
+            )}
             <div className="px-4 py-3 border-b border-white/10 flex items-center gap-3">
                 <div>
                     <div className="label-key">LIVE OCC</div>
