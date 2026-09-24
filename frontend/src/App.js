@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo } from "react";
+import React, { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import "@/App.css";
 import { api } from "./api";
 import BootScreen from "./components/BootScreen";
@@ -36,6 +36,7 @@ function App() {
     const [playing, setPlaying] = useState(false);
     const [speed, setSpeed] = useState(2); // 1=1×, 2=2×, 3=5×, 4=15×
     const [nextDayBusy, setNextDayBusy] = useState(false);
+    const tickInFlight = useRef(false);
 
     // Restore prior session if exists
     useEffect(() => {
@@ -83,7 +84,8 @@ function App() {
     }
 
     async function tick(minutes) {
-        if (!state?.id || state.phase !== "OPS") return;
+        if (!state?.id || state.phase !== "OPS" || tickInFlight.current) return;
+        tickInFlight.current = true;
         setTicking(true);
         try {
             const res = await api.tick(state.id, minutes);
@@ -103,6 +105,7 @@ function App() {
             setPlaying(false);
             setToast(`⚠ TICK FAILED: ${e?.message || "backend error"} — auto-paused`);
         } finally {
+            tickInFlight.current = false;
             setTicking(false);
         }
     }
@@ -124,7 +127,7 @@ function App() {
         let cancelled = false;
         const loop = async () => {
             if (cancelled) return;
-            if (ticking) return;
+            if (tickInFlight.current) return;
             await tick(cfg.minutes);
         };
         const t = setInterval(loop, cfg.interval);
@@ -234,7 +237,7 @@ function App() {
         try {
             const s = await api.getState(id);
             setState(s);
-            setView(s.phase === "DEBRIEF" ? "debrief" : s.phase === "OPS" ? "live-occ" : "roster");
+            setView(s.phase === "DEBRIEF" ? "debrief" : s.phase === "OPS" ? "live-occ" : s.is_planner_mode ? "calendar" : "roster");
         } catch {
             localStorage.removeItem(STORAGE_KEY);
         }
@@ -305,7 +308,7 @@ function App() {
                         <ProblemMonitor state={state} onOpenCrew={() => setView("disposition")} />
                     )}
                     {state.phase === "OPS" && <CascadeStrip state={state} />}
-                    <div className="flex-1 overflow-hidden">
+                    <div className={`flex-1 ${showView === "live-occ" ? "overflow-x-auto overflow-y-hidden" : "overflow-hidden"}`}>
                     {showView === "live-occ" && state.phase === "OPS" && (
                         <LiveOcc
                             state={state}
@@ -373,6 +376,7 @@ function App() {
             {toast && (
                 <div
                     data-testid="toast"
+                    role="alert"
                     className="fixed bottom-6 right-6 panel px-4 py-3 z-40"
                     style={{ borderTop: "2px solid var(--status-warning)" }}
                 >

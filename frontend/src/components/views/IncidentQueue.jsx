@@ -199,7 +199,7 @@ function IncidentCard({ inc, state, onResolve, onAskAdvisor, onOpenAircraftContr
             {inc.status === "open" && inc.requires_aircraft_decision && (
                 <div className="mt-2 font-mono-jb text-xs t-crit" data-testid={`aircraft-decision-hint-${inc.id}`}>
                     ⛔ GROUNDED — not MEL-deferrable. Reassign a real tail via AIRCRAFT CONTROL, or cancel below.
-                    The whole clock is frozen until this is resolved.
+                    The clock continues. Only this tail's affected rotation is held until you recover or cancel it.
                 </div>
             )}
             {inc.status === "open" && (

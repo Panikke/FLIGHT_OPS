@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../api";
 import WarningBlock from "../WarningBlock";
 
@@ -34,6 +34,9 @@ export default function FlightAssignmentDesk({ state, onChanged, onStartDay }) {
     const [selectedCrewId, setSelectedCrewId] = useState(null);
     const [warnings, setWarnings] = useState([]);
     const [discretion, setDiscretion] = useState(null);
+    const [checking, setChecking] = useState(false);
+    const [checkedSelection, setCheckedSelection] = useState(null);
+    const checkRequest = useRef(0);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState(null);
 
@@ -52,6 +55,9 @@ export default function FlightAssignmentDesk({ state, onChanged, onStartDay }) {
     }, {}), [assigned]);
 
     useEffect(() => {
+        checkRequest.current += 1;
+        setChecking(false);
+        setCheckedSelection(null);
         if (!selectedPairing) return;
         const nextGap = RANKS.find((role) => (assignedByRank[role]?.length || 0) < (selectedPairing.required[role] || 0));
         setRank(nextGap || "CP");
@@ -75,24 +81,58 @@ export default function FlightAssignmentDesk({ state, onChanged, onStartDay }) {
 
     const selectedCrew = state.crew.find((crew) => crew.id === selectedCrewId);
     const hasCritical = warnings.some((warning) => warning.severity === "critical");
+    const checkReady = !!selectedCrewId && !checking && !error
+        && checkedSelection?.pairingId === selectedPairing?.id
+        && checkedSelection?.crewId === selectedCrewId;
+
+    function chooseRank(role) {
+        checkRequest.current += 1;
+        setRank(role);
+        setSelectedCrewId(null);
+        setCheckedSelection(null);
+        setChecking(false);
+        setWarnings([]);
+        setDiscretion(null);
+        setError(null);
+    }
+
+    function choosePairing(pairingId) {
+        checkRequest.current += 1;
+        setSelectedPairingId(pairingId);
+        setSelectedCrewId(null);
+        setCheckedSelection(null);
+        setChecking(false);
+        setWarnings([]);
+        setDiscretion(null);
+        setError(null);
+    }
 
     async function inspectCrew(crewId) {
         if (!selectedPairing) return;
+        const request = ++checkRequest.current;
+        const pairingId = selectedPairing.id;
         setSelectedCrewId(crewId);
+        setCheckedSelection(null);
+        setChecking(true);
         setWarnings([]);
         setDiscretion(null);
         setError(null);
         try {
             const result = await api.precheck(state.id, selectedPairing.primary.id, crewId);
+            if (request !== checkRequest.current) return;
             setWarnings(result.warnings || []);
             setDiscretion(result.discretion || null);
+            setCheckedSelection({ pairingId, crewId });
         } catch {
+            if (request !== checkRequest.current) return;
             setError("Could not complete the legality pre-check. Try again before assigning.");
+        } finally {
+            if (request === checkRequest.current) setChecking(false);
         }
     }
 
     async function assign(force = false, useDiscretion = false) {
-        if (!selectedPairing || !selectedCrewId) return;
+        if (!selectedPairing || !checkReady) return;
         setBusy(true);
         setError(null);
         try {
@@ -102,6 +142,7 @@ export default function FlightAssignmentDesk({ state, onChanged, onStartDay }) {
                 return;
             }
             setSelectedCrewId(null);
+            setCheckedSelection(null);
             await onChanged();
         } catch (err) {
             setError(err?.response?.data?.detail || "Assignment could not be saved.");
@@ -156,7 +197,7 @@ export default function FlightAssignmentDesk({ state, onChanged, onStartDay }) {
                             const active = pairing.id === selectedPairing.id;
                             const covered = pairing.crewIds.length >= pairing.requiredCount;
                             return (
-                                <button key={pairing.id} data-testid={`pairing-${pairing.id}`} onClick={() => setSelectedPairingId(pairing.id)} className={`w-full text-left px-4 py-3 border-b border-white/[.06] ${active ? "bg-[var(--status-info)]/10 border-l-2 border-l-[var(--status-info)]" : "hover:bg-white/[.035]"}`}>
+                                <button key={pairing.id} data-testid={`pairing-${pairing.id}`} onClick={() => choosePairing(pairing.id)} className={`w-full text-left px-4 py-3 border-b border-white/[.06] ${active ? "bg-[var(--status-info)]/10 border-l-2 border-l-[var(--status-info)]" : "hover:bg-white/[.035]"}`}>
                                     <div className="flex justify-between font-mono-jb text-xs"><span className="t-info">{clock(pairing.primary.std)}Z · {pairing.primary.aircraft_reg}</span><span className={covered ? "t-nominal" : "t-warn"}>{covered ? "READY" : "GAP"}</span></div>
                                     <div className="font-azeret text-sm mt-1">{pairing.flights.map((flight) => `${flight.origin}–${flight.destination}`).join(" · ")}</div>
                                     <div className="font-mono-jb text-[11px] t-sec mt-1">{pairing.flights.map((flight) => flight.callsign).join(" / ")} · {pairing.crewIds.length}/{pairing.requiredCount} crew</div>
@@ -183,7 +224,7 @@ export default function FlightAssignmentDesk({ state, onChanged, onStartDay }) {
                                 const crew = assignedByRank[role] || [];
                                 const open = Math.max(0, required - crew.length);
                                 return (
-                                    <button key={role} disabled={!required} onClick={() => setRank(role)} className={`text-left panel-flush p-3 border ${rank === role ? "border-[var(--status-info)] bg-[var(--status-info)]/10" : "border-white/10"}`}>
+                                    <button key={role} disabled={!required} onClick={() => chooseRank(role)} className={`text-left panel-flush p-3 border ${rank === role ? "border-[var(--status-info)] bg-[var(--status-info)]/10" : "border-white/10"}`}>
                                         <div className="flex justify-between font-mono-jb text-xs"><span className="t-info">{role}</span><span className={open ? "t-warn" : "t-nominal"}>{crew.length}/{required}</span></div>
                                         <div className="font-mono-jb text-[11px] t-sec mt-2">{crew.length ? crew.map((member) => `${member.id} ${member.name}`).join(" · ") : "UNASSIGNED"}</div>
                                         {open > 0 && <div className="uppercase-wide t-warn mt-2">{open} SLOT{open === 1 ? "" : "S"} OPEN</div>}
@@ -210,15 +251,16 @@ export default function FlightAssignmentDesk({ state, onChanged, onStartDay }) {
                 <aside className="w-[340px] flex flex-col">
                     <div className="px-4 py-3 border-b border-white/10"><div className="label-key">LEGALITY GATE</div><div className="font-mono-jb text-xs t-sec mt-1">{selectedCrew ? `${selectedCrew.id} · ${selectedCrew.name}` : "Select a candidate to inspect."}</div></div>
                     <div className="flex-1 scroll-area p-4">
-                        {selectedCrewId && !warnings.length && !error && <div className="font-mono-jb text-xs t-nominal">[OK] No legality issues detected. Cleared to assign to every sector in this pairing.</div>}
+                        {selectedCrewId && checking && <div className="font-mono-jb text-xs t-info" role="status">[WAIT] Checking qualification, rest and FTL…</div>}
+                        {checkReady && !warnings.length && <div className="font-mono-jb text-xs t-nominal">[OK] No legality issues detected. Cleared to assign to every sector in this pairing.</div>}
                         {!selectedCrewId && <div className="font-mono-jb text-xs t-muted">The gate prevents a crew member being assigned without a live check. This preserves the operating constraints used by the simulation.</div>}
                         {warnings.map((warning, index) => <WarningBlock key={`${warning.code || "warning"}-${index}`} warning={warning} testIdPrefix="pairing-warning" />)}
                         {error && <div className="font-mono-jb text-xs t-crit">ERR: {error}</div>}
                     </div>
                     <div className="border-t border-white/10 p-4 space-y-2">
-                        <button data-testid="pairing-assign-btn" className="btn btn-primary w-full" disabled={!selectedCrewId || busy || hasCritical} onClick={() => assign()}>{busy ? "SAVING..." : `ASSIGN ${rank} TO PAIRING`}</button>
-                        {hasCritical && discretion?.available && <button className="btn btn-warn w-full" disabled={busy} onClick={() => assign(false, true)}>COMMANDER'S DISCRETION +{discretion.overrun_min}M</button>}
-                        {hasCritical && <button className="btn btn-danger w-full" disabled={busy} onClick={() => assign(true)}>OVERRIDE (BOOKS BREACH)</button>}
+                        <button data-testid="pairing-assign-btn" className="btn btn-primary w-full" disabled={!checkReady || busy || hasCritical} onClick={() => assign()}>{busy ? "SAVING..." : `ASSIGN ${rank} TO PAIRING`}</button>
+                        {hasCritical && discretion?.available && <button className="btn btn-warn w-full" disabled={!checkReady || busy} onClick={() => assign(false, true)}>COMMANDER'S DISCRETION +{discretion.overrun_min}M</button>}
+                        {hasCritical && <button className="btn btn-danger w-full" disabled={!checkReady || busy} onClick={() => assign(true)}>OVERRIDE (BOOKS BREACH)</button>}
                         <div className="pt-2 border-t border-white/10"><div className="label-key mb-2">REMOVE FROM THIS PAIRING</div>{assigned.map((crew) => <div key={crew.id} className="flex justify-between items-center font-mono-jb text-xs py-1"><span>{crew.id} · {crew.rank}</span><button className="btn btn-danger !py-1 !px-2" disabled={busy} onClick={() => unassign(crew.id)}>REMOVE</button></div>)}{!assigned.length && <div className="font-mono-jb text-xs t-muted">No crew currently assigned.</div>}</div>
                     </div>
                 </aside>
