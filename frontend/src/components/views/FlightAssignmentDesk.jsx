@@ -123,8 +123,9 @@ export default function FlightAssignmentDesk({ state, onChanged, onStartDay }) {
 
     const completePairings = pairings.filter((pairing) => pairing.crewIds.length >= pairing.requiredCount).length;
     const allComplete = completePairings === pairings.length;
-    const isLongHaul = selectedPairing.primary.block_min > 360;
-    const shortHaulNightStop = !isLongHaul && selectedPairing.flights[selectedPairing.flights.length - 1].destination !== "LHR";
+    const isLongHaul = selectedPairing && selectedPairing.primary.block_min > 360;
+    const shortHaulNightStop = selectedPairing && !isLongHaul
+        && selectedPairing.flights[selectedPairing.flights.length - 1].destination !== "LHR";
 
     if (!selectedPairing) {
         return <div className="p-5 font-mono-jb t-muted">No released flights are available for assignment.</div>;
