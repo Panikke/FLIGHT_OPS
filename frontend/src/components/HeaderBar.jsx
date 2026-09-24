@@ -36,7 +36,7 @@ export default function HeaderBar({
     speed,
     onTogglePlay,
     onChangeSpeed,
-    pausedForAircraft,
+    groundedDecisionCount,
 }) {
     if (!state) return null;
     const k = state.kpis;
@@ -67,15 +67,15 @@ export default function HeaderBar({
                 label="ZULU CLOCK"
                 value={fmtClock(state.clock)}
                 sub={
-                    pausedForAircraft
-                        ? "⛔ GROUNDED — DECISION REQUIRED"
+                    groundedDecisionCount
+                        ? `⛔ ${groundedDecisionCount} AOG RESPONSE${groundedDecisionCount > 1 ? "S" : ""} OPEN`
                         : playing
                           ? `▶ PLAY ${["", "1×", "2×", "5×", "15×"][speed] || ""}`
                           : state.phase === "OPS"
                             ? "PAUSED"
                             : ""
                 }
-                tone={pausedForAircraft ? "crit" : "info"}
+                tone={groundedDecisionCount ? "crit" : "info"}
                 testid="kpi-clock"
             />
             <Kpi label="OTP%" value={`${k.otp_pct.toFixed(0)}`} sub="ON-TIME PERFORMANCE" tone={otpTone} testid="kpi-otp" />
@@ -110,16 +110,16 @@ export default function HeaderBar({
             <div className="flex items-center gap-2 px-4 py-2 border-l border-t border-white/10 flex-wrap">
                 {state.phase === "OPS" && (
                     <>
-                        {pausedForAircraft && (
-                            <span className="badge t-crit" data-testid="paused-for-aircraft-badge">
-                                ⛔ CLOCK FROZEN — RESOLVE THE GROUNDED TAIL
+                        {groundedDecisionCount > 0 && (
+                            <span className="badge t-crit" data-testid="aog-pressure-badge">
+                                ⛔ AOG PRESSURE — CLOCK RUNNING
                             </span>
                         )}
                         <button
                             data-testid="speed-down-btn"
                             className="btn"
                             onClick={() => onChangeSpeed(Math.max(1, speed - 1))}
-                            disabled={speed <= 1 || pausedForAircraft}
+                            disabled={speed <= 1}
                             title="Slower"
                             aria-label="Decrease simulation speed"
                         >
@@ -130,7 +130,6 @@ export default function HeaderBar({
                             className={`btn ${playing ? "btn-warn" : "btn-ok"}`}
                             onClick={onTogglePlay}
                             aria-pressed={playing}
-                            disabled={pausedForAircraft}
                         >
                             {playing ? "⏸ PAUSE" : "▶ PLAY"}
                             <span className="t-muted ml-2" aria-hidden="true">␣</span>
@@ -139,7 +138,7 @@ export default function HeaderBar({
                             data-testid="speed-up-btn"
                             className="btn"
                             onClick={() => onChangeSpeed(Math.min(4, speed + 1))}
-                            disabled={speed >= 4 || pausedForAircraft}
+                            disabled={speed >= 4}
                             title="Faster"
                             aria-label="Increase simulation speed"
                         >
@@ -158,7 +157,6 @@ export default function HeaderBar({
                                     onClick={() => onChangeSpeed(s.id)}
                                     aria-pressed={speed === s.id}
                                     aria-label={`Set speed to ${s.label}`}
-                                    disabled={pausedForAircraft}
                                     className={`font-mono-jb uppercase text-[11px] tracking-widest px-3 py-2 border-r border-white/10 last:border-r-0 focus-ring-inset cursor-pointer ${
                                         speed === s.id
                                             ? "bg-[var(--status-info)] text-black"
@@ -173,7 +171,7 @@ export default function HeaderBar({
                             data-testid="tick-15-btn"
                             className="btn"
                             onClick={() => onTick(15)}
-                            disabled={ticking || pausedForAircraft}
+                            disabled={ticking}
                         >
                             +15M
                             <span className="t-muted ml-2" aria-hidden="true">[</span>
@@ -182,7 +180,7 @@ export default function HeaderBar({
                             data-testid="tick-30-btn"
                             className="btn"
                             onClick={() => onTick(30)}
-                            disabled={ticking || pausedForAircraft}
+                            disabled={ticking}
                         >
                             +30M
                             <span className="t-muted ml-2" aria-hidden="true">]</span>
@@ -191,7 +189,7 @@ export default function HeaderBar({
                             data-testid="tick-60-btn"
                             className="btn"
                             onClick={() => onTick(60)}
-                            disabled={ticking || pausedForAircraft}
+                            disabled={ticking}
                         >
                             +60M
                         </button>

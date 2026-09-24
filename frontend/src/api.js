@@ -34,12 +34,19 @@ export const api = {
         client.post(`/sim/${gid}/crew/${crewId}/day_off`, { day, off }).then((r) => r.data),
     aircraftControl: (gid) => client.get(`/sim/${gid}/aircraft_control`).then((r) => r.data),
     irregularities: (gid) => client.get(`/sim/${gid}/irregularities`).then((r) => r.data),
+    occWorkspace: (gid, flightId) =>
+        client.get(`/sim/${gid}/occ`, { params: flightId ? { flight_id: flightId } : {} }).then((r) => r.data),
     crewDisposition: (gid) => client.get(`/sim/${gid}/crew_disposition`).then((r) => r.data),
     openTime: (gid) => client.get(`/sim/${gid}/open_time`).then((r) => r.data),
     planDuty: (gid, crewIds, days, code) =>
         client
             .post(`/sim/${gid}/plan_duty`, { crew_ids: crewIds, days, code })
             .then((r) => r.data),
+    crewGroups: (gid) => client.get(`/sim/${gid}/crew_groups`).then((r) => r.data),
+    saveCrewGroup: (gid, name, crewIds, operation) =>
+        client.post(`/sim/${gid}/crew_groups`, { name, crew_ids: crewIds, operation }).then((r) => r.data),
+    deleteCrewGroup: (gid, groupId) =>
+        client.delete(`/sim/${gid}/crew_groups/${groupId}`).then((r) => r.data),
     disposeCrew: (gid, crewId, action) =>
         client.post(`/sim/${gid}/crew/${crewId}/dispose`, { action }).then((r) => r.data),
     previewDispose: (gid, crewId, action) =>

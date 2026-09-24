@@ -373,7 +373,10 @@ export default function AircraftControl({ state, onChanged }) {
 
 const VERDICT_TONE = { OPTIMAL: "t-nominal", GOOD: "t-info", SUBOPTIMAL: "t-warn" };
 
-function ReassignModal({ state, rotation, fleet, minTurn = 45, hub = "LHR", onClose, onAssigned }) {
+// The same recovery decision belongs in the full fleet board and in the
+// incident-first Focus Desk.  Keeping one modal means the legality, ferry and
+// upgauge checks cannot drift apart between the two entry points.
+export function ReassignModal({ state, rotation, fleet, minTurn = 45, hub = "LHR", onClose, onAssigned }) {
     const [selected, setSelected] = useState(null);
     const [warnings, setWarnings] = useState([]);
     const [ferryWarnings, setFerryWarnings] = useState(null); // null = not checked yet

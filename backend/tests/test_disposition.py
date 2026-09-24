@@ -263,6 +263,18 @@ def test_planning_standby_over_a_day_off_replaces_it():
     assert st["crew"][0]["duty_plan"]["2"] == "SBY_HOME"
 
 
+def test_planning_flight_duty_marks_a_future_operating_day_without_assigning_a_route():
+    st = _state([], crew=[_crew("CP1", "CP", "Larsen")])
+    st["phase"] = "ROSTER"
+    sim.plan_duty(st, ["CP1"], [2], "OFF")
+    res = sim.plan_duty(st, ["CP1"], [2], "FLT")
+    assert res["ok"] is True
+    assert st["crew"][0]["days_off_planned"] == []
+    assert st["crew"][0]["duty_plan"]["2"] == "FLT"
+    row = next(r for r in sim.crew_roster(st)["crew"] if r["crew_id"] == "CP1")
+    assert next(cell for cell in row["cells"] if cell["day"] == 2)["code"] == "FLT"
+
+
 def test_clear_removes_whatever_was_planned():
     st = _state([], crew=[_crew("CP1", "CP", "Larsen")])
     st["phase"] = "ROSTER"

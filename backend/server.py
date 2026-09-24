@@ -75,6 +75,12 @@ class PlanDutyReq(BaseModel):
     code: str
 
 
+class CrewGroupReq(BaseModel):
+    name: str
+    crew_ids: list[str]
+    operation: str = "SHORT_HAUL"
+
+
 # ---------------- DB helpers ---------------- #
 async def _load(game_id: str) -> dict:
     doc = await db.games.find_one({"id": game_id}, {"_id": 0})
@@ -141,12 +147,43 @@ async def irregularities(game_id: str):
     }
 
 
+@api_router.get("/sim/{game_id}/occ")
+async def occ_workspace(game_id: str, flight_id: str | None = None):
+    """LIVE OCC common operating picture, optionally focused on one flight."""
+    state = await _load(game_id)
+    return sim.operational_workspace(state, focus_flight_id=flight_id)
+
+
 @api_router.post("/sim/{game_id}/plan_duty")
 async def plan_duty(game_id: str, body: PlanDutyReq):
     """Write a planned duty across any number of crew and days at once."""
     state = await _load(game_id)
     result = sim.plan_duty(state, body.crew_ids, body.days, body.code)
     if result.get("ok") and result.get("applied"):
+        await _save(state)
+    return result
+
+
+@api_router.get("/sim/{game_id}/crew_groups")
+async def get_crew_groups(game_id: str):
+    state = await _load(game_id)
+    return {"groups": sim.crew_groups(state)}
+
+
+@api_router.post("/sim/{game_id}/crew_groups")
+async def save_crew_group(game_id: str, body: CrewGroupReq):
+    state = await _load(game_id)
+    result = sim.save_crew_group(state, body.name, body.crew_ids, body.operation)
+    if result.get("ok"):
+        await _save(state)
+    return result
+
+
+@api_router.delete("/sim/{game_id}/crew_groups/{group_id}")
+async def delete_crew_group(game_id: str, group_id: str):
+    state = await _load(game_id)
+    result = sim.delete_crew_group(state, group_id)
+    if result.get("ok"):
         await _save(state)
     return result
 

@@ -91,17 +91,40 @@ export default function CrewRoster({ state, onChanged }) {
     // Rostering a base means moving groups of people. Doing it one cell at a
     // time is data entry, not planning.
     const [selected, setSelected] = useState(() => new Set());
+    const [selectionAnchor, setSelectionAnchor] = useState(null);
     const [selectedDays, setSelectedDays] = useState(() => new Set());
     const [bulkBusy, setBulkBusy] = useState(false);
     const [bulkNote, setBulkNote] = useState(null);
+    const [groups, setGroups] = useState([]);
+    const [groupName, setGroupName] = useState("");
+    const [groupOperation, setGroupOperation] = useState("SHORT_HAUL");
 
-    function toggleCrew(crewId) {
+    function toggleCrew(crewId, shiftKey = false) {
+        // Match the range-selection muscle memory of an actual rostering
+        // spreadsheet: select one crew member, then Shift-click another to
+        // include everybody displayed between them.  The current filter and
+        // sort order deliberately define the range, so controllers can first
+        // narrow to a fleet/rank/base cohort and select it in one gesture.
+        if (shiftKey && selectionAnchor) {
+            const first = rows.findIndex((crew) => crew.crew_id === selectionAnchor);
+            const last = rows.findIndex((crew) => crew.crew_id === crewId);
+            if (first !== -1 && last !== -1) {
+                const [from, to] = first < last ? [first, last] : [last, first];
+                setSelected((prev) => {
+                    const next = new Set(prev);
+                    rows.slice(from, to + 1).forEach((crew) => next.add(crew.crew_id));
+                    return next;
+                });
+                return;
+            }
+        }
         setSelected((prev) => {
             const next = new Set(prev);
             if (next.has(crewId)) next.delete(crewId);
             else next.add(crewId);
             return next;
         });
+        setSelectionAnchor(crewId);
     }
 
     function toggleDay(day) {
@@ -146,8 +169,9 @@ export default function CrewRoster({ state, onChanged }) {
     const load = useCallback(async () => {
         if (!state?.id) return;
         try {
-            const r = await api.crewRoster(state.id);
+            const [r, savedGroups] = await Promise.all([api.crewRoster(state.id), api.crewGroups(state.id)]);
             setRoster(r);
+            setGroups(savedGroups.groups || []);
             setError(null);
         } catch (e) {
             setError(e?.message || "failed to load roster");
@@ -155,6 +179,33 @@ export default function CrewRoster({ state, onChanged }) {
             setLoading(false);
         }
     }, [state?.id]);
+
+    async function saveGroup() {
+        if (!selected.size || !groupName.trim()) return;
+        setBulkBusy(true);
+        try {
+            const result = await api.saveCrewGroup(state.id, groupName, [...selected], groupOperation);
+            if (!result.ok) {
+                setBulkNote(`Group not saved: ${result.error}`);
+                return;
+            }
+            setGroupName("");
+            setBulkNote(`${result.group.name} saved · ${result.group.crew_ids.length} crew`);
+            await load();
+        } finally {
+            setBulkBusy(false);
+        }
+    }
+
+    async function removeGroup(groupId) {
+        setBulkBusy(true);
+        try {
+            await api.deleteCrewGroup(state.id, groupId);
+            await load();
+        } finally {
+            setBulkBusy(false);
+        }
+    }
 
     // Reload when the day rolls, the phase changes, or assignments change.
     useEffect(() => {
@@ -242,6 +293,7 @@ export default function CrewRoster({ state, onChanged }) {
                     {selected.size > 0 && selectedDays.size > 0 ? (
                         <>
                             {[
+                                ["FLT", "FLT DUTY"],
                                 ["OFF", "DAY OFF"],
                                 ["SBY_APT", "AIRPORT STANDBY"],
                                 ["SBY_HOME", "HOME STANDBY"],
@@ -254,7 +306,9 @@ export default function CrewRoster({ state, onChanged }) {
                                     onClick={() => applyBulk(code)}
                                     data-testid={`bulk-${code}`}
                                     title={
-                                        code === "SBY_APT"
+                                        code === "FLT"
+                                            ? "Retain for flight duty; route assignment remains subject to qualification and FTL checks"
+                                            : code === "SBY_APT"
                                             ? "30min to report, but their duty clock is already running"
                                             : code === "SBY_HOME"
                                             ? "90min to report, fresh, erodes FDP past 6h on standby"
@@ -268,7 +322,7 @@ export default function CrewRoster({ state, onChanged }) {
                     ) : (
                         <span className="t-muted">
                             {selected.size === 0 && selectedDays.size === 0
-                                ? "① Tick crew on the left, then ② click the day columns you want to change."
+                                ? "① Tick crew on the left (Shift-click another name to select the range), then ② click the day columns you want to change."
                                 : selected.size === 0
                                 ? "① Now tick the crew on the left."
                                 : "② Now click one or more day columns in the header."}
@@ -289,11 +343,39 @@ export default function CrewRoster({ state, onChanged }) {
                 </div>
             )}
 
+            <div className="px-4 py-2 border-b border-white/10 flex items-center gap-2 flex-wrap font-mono-jb text-xs" data-testid="crew-groups-bar">
+                <span className="label-key">CREW GROUPS</span>
+                {groups.filter((group) => (group.operation || "SHORT_HAUL") === "SHORT_HAUL").map((group) => (
+                    <span key={group.id} className="inline-flex items-center border border-white/10 bg-white/[.025]">
+                        <button className="px-2 py-1 t-info hover:bg-white/[.06]" onClick={() => setSelected(new Set(group.crew_ids))} title={`Select ${group.crew_ids.length} crew in ${group.name}`}>
+                            {group.name} <span className="t-sec">{group.crew_ids.length}</span>
+                        </button>
+                        <button className="px-2 py-1 t-muted hover:text-[var(--status-critical)]" disabled={bulkBusy} onClick={() => removeGroup(group.id)} title={`Remove saved group ${group.name}`}>×</button>
+                    </span>
+                ))}
+                {groups.some((group) => (group.operation || "SHORT_HAUL") === "LONG_HAUL") && <span className="h-5 border-l border-white/15" />}
+                {groups.filter((group) => group.operation === "LONG_HAUL").map((group) => (
+                    <span key={group.id} className="inline-flex items-center border border-[var(--status-warning)]/40 bg-[var(--status-warning)]/[.04]">
+                        <button className="px-2 py-1 t-warn hover:bg-white/[.06]" onClick={() => setSelected(new Set(group.crew_ids))} title={`Select ${group.crew_ids.length} long-haul crew in ${group.name}`}>
+                            LH · {group.name} <span className="t-sec">{group.crew_ids.length}</span>
+                        </button>
+                        <button className="px-2 py-1 t-muted hover:text-[var(--status-critical)]" disabled={bulkBusy} onClick={() => removeGroup(group.id)} title={`Remove saved group ${group.name}`}>×</button>
+                    </span>
+                ))}
+                <div className="flex-1" />
+                <input data-testid="crew-group-name" className="!w-36" placeholder="GROUP NAME" value={groupName} onChange={(event) => setGroupName(event.target.value)} />
+                <button className={`btn ${groupOperation === "SHORT_HAUL" ? "btn-primary" : ""}`} onClick={() => setGroupOperation("SHORT_HAUL")}>SHORT-HAUL</button>
+                <button className={`btn ${groupOperation === "LONG_HAUL" ? "btn-warn" : ""}`} onClick={() => setGroupOperation("LONG_HAUL")}>LONG-HAUL</button>
+                <button data-testid="save-crew-group" className="btn" disabled={!selected.size || !groupName.trim() || bulkBusy} onClick={saveGroup}>SAVE {selected.size || ""} CREW</button>
+            </div>
+
             {/* Header */}
             <div className="px-4 py-3 border-b border-white/10 flex items-center gap-4">
-                <div>
-                    <div className="label-key">CREW ROSTER LINE</div>
-                    <div className="font-azeret text-lg">ROSTER PLANNER · LHR BASE</div>
+                    <div>
+                        <div className="label-key">CREW ROSTER LINE</div>
+                    <div className="font-azeret text-lg">
+                        {state?.is_planner_mode ? "PLANNER MODE · 28-DAY CONTROL WINDOW" : "ROSTER PLANNER · LHR BASE"}
+                    </div>
                 </div>
                 <div className="flex-1" />
                 <div className="uppercase-wide t-sec">
@@ -345,7 +427,7 @@ export default function CrewRoster({ state, onChanged }) {
                             {c}
                         </span>
                     ))}
-                    <span className="t-sec">· CLICK A FUTURE CELL TO TOGGLE OFF</span>
+                    <span className="t-sec">· SHIFT-CLICK CREW TO SELECT A RANGE · CLICK A FUTURE CELL TO TOGGLE OFF</span>
                 </div>
             </div>
 
@@ -360,13 +442,14 @@ export default function CrewRoster({ state, onChanged }) {
                                     aria-label="Select all shown crew"
                                     data-testid="roster-select-all"
                                     checked={rows.length > 0 && rows.every((r) => selected.has(r.crew_id))}
-                                    onChange={(e) =>
+                                    onChange={(e) => {
+                                        setSelectionAnchor(null);
                                         setSelected(
                                             e.target.checked
                                                 ? new Set(rows.map((r) => r.crew_id))
                                                 : new Set()
-                                        )
-                                    }
+                                        );
+                                    }}
                                 />
                             </th>
                             <th className="text-left px-3 py-2 border-b border-white/10 sticky left-0 bg-[#050505] z-20">CREW</th>
@@ -435,16 +518,29 @@ export default function CrewRoster({ state, onChanged }) {
                                     }`}
                                     data-testid={`roster-row-${c.crew_id}`}
                                 >
-                                    <td className="px-2 py-1 sticky left-0 bg-[#050505] z-10">
+                                    <td
+                                        className="px-2 py-1 sticky left-0 bg-[#050505] z-10 cursor-pointer"
+                                        onClick={(e) => {
+                                            // React's checkbox change event does not consistently
+                                            // retain modifier keys. Read Shift from the click itself.
+                                            e.preventDefault();
+                                            toggleCrew(c.crew_id, e.shiftKey);
+                                        }}
+                                    >
                                         <input
                                             type="checkbox"
                                             aria-label={`Select ${c.crew_id} ${c.name}`}
                                             data-testid={`roster-select-${c.crew_id}`}
                                             checked={selected.has(c.crew_id)}
-                                            onChange={() => toggleCrew(c.crew_id)}
+                                            readOnly
+                                            className="pointer-events-none"
                                         />
                                     </td>
-                                    <td className="px-3 py-1 sticky left-0 bg-[#050505] z-10 whitespace-nowrap">
+                                    <td
+                                        className="px-3 py-1 sticky left-0 bg-[#050505] z-10 whitespace-nowrap cursor-pointer"
+                                        onClick={(e) => toggleCrew(c.crew_id, e.shiftKey)}
+                                        title="Click to select crew; Shift-click another name to select the range"
+                                    >
                                         <span className="t-info">{c.crew_id}</span>{" "}
                                         <span className="t-sec">{c.name}</span>
                                     </td>
